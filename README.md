@@ -7,8 +7,9 @@ It never changes Apple Mail and never sends mail.
 It mirrors [meet42](https://github.com/Work42-Ai/meet42): a signed `mail42.app` (bundle id `com.work42.mail42`)
 owns the privileged access and the database, and the Work42 plugin in `work42-plugin/` only talks to the CLI.
 
-> Status: in progress (Linear WOR-438). Working today: the whole CLI (`permissions`, `sync`, `config`, `mailbox`,
-> `envelope`, `message`, `attachment`, `open`). Still to come: the Work42 plugin and its skills.
+> Status: 0.1.0, not yet released. The whole CLI (`permissions`, `sync`, `config`, `mailbox`, `envelope`,
+> `message`, `attachment`, `open`), the Work42 Mail widget and the `mail42-setup` / `mail42-cli` skills are built
+> and tested against synthetic mailboxes.
 
 ## Install
 
@@ -24,6 +25,18 @@ mkdir -p ~/.work42/bin && ln -sfn ~/.work42/mail42.app/Contents/MacOS/mail42 ~/.
 ```
 
 Work42 puts `~/.work42/bin` on your PATH.
+
+### The Work42 plugin
+
+The plugin adds the **Mail** widget (`widget:mail`: a message list and a full-HTML reader, with highlight-to-comment
+and a background sync) and two skills for agents: `mail42-setup` (install, Full Disk Access, first sync) and
+`mail42-cli` (how to read mail with the CLI, and how to prepare a reply as a Mail.app draft). Install it with:
+
+```bash
+work42 plugin install https://github.com/Work42-Ai/mail42 --path work42-plugin
+```
+
+The widget only runs the `mail42` CLI; it never reads Apple Mail itself.
 
 ## Full Disk Access
 
