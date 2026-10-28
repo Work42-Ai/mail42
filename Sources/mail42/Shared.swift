@@ -39,6 +39,23 @@ enum CLI {
     private struct ErrorEnvelope: Encodable { let error: ErrorBody }
     private struct ErrorBody: Encodable { let code: String; let message: String }
 
+    /// Exit code for a failure: 1 when mail42 can't read Apple Mail (no Full Disk Access, no Mail data, an
+    /// index this version doesn't understand), 2 for everything else (store, usage, not found, bad query).
+    static func exitCode(for error: Mail42Error) -> Int32 {
+        switch error {
+        case .fdaDenied, .noMailData, .schemaUnsupported: return 1
+        default: return 2
+        }
+    }
+
+    /// Prints any error the way every verb should and exits.
+    static func fail(error: Error, json: Bool) -> Never {
+        if let error = error as? Mail42Error {
+            fail(code: error.code, message: error.localizedDescription, exit: exitCode(for: error), json: json)
+        }
+        fail(code: "error", message: error.localizedDescription, exit: 2, json: json)
+    }
+
     // MARK: - Arg parsing
 
     static func argValue(_ args: [String], _ name: String) -> String? {

@@ -10,6 +10,26 @@ import Testing
         #expect(Mail42Paths.trace.lastPathComponent == "trace.jsonl")
     }
 
+    @Test func environmentOverridesRedirectBothLocations() {
+        let env = ["MAIL42_ROOT": "/tmp/sandbox-root", "MAIL42_MAIL_LIBRARY": "/tmp/sandbox-mail"]
+        #expect(Mail42Paths.root(environment: env).path == "/tmp/sandbox-root")
+        #expect(Mail42Paths.appleMailLibrary(environment: env).path == "/tmp/sandbox-mail")
+    }
+
+    @Test func emptyOrMissingOverridesFallBackToTheHomeDirectory() {
+        for env in [[:], ["MAIL42_ROOT": "", "MAIL42_MAIL_LIBRARY": ""]] as [[String: String]] {
+            #expect(Mail42Paths.root(environment: env).path.hasSuffix("/.work42/mail42"))
+            #expect(Mail42Paths.appleMailLibrary(environment: env).path.hasSuffix("/Library/Mail"))
+        }
+    }
+
+    @Test func derivedFilesFollowTheRootOverride() {
+        // db and trace are built from `root`, so one override moves everything mail42 writes.
+        let env = ProcessInfo.processInfo.environment
+        #expect(Mail42Paths.db.deletingLastPathComponent() == Mail42Paths.root(environment: env))
+        #expect(Mail42Paths.trace.deletingLastPathComponent() == Mail42Paths.root(environment: env))
+    }
+
     @Test func appleMailRootPicksTheHighestVersionDirectory() throws {
         let library = FileManager.default.temporaryDirectory
             .appendingPathComponent("mail42-paths-\(UUID().uuidString)")

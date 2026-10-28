@@ -7,8 +7,8 @@ It never changes Apple Mail and never sends mail.
 It mirrors [meet42](https://github.com/Work42-Ai/meet42): a signed `mail42.app` (bundle id `com.work42.mail42`)
 owns the privileged access and the database, and the Work42 plugin in `work42-plugin/` only talks to the CLI.
 
-> Status: the repo scaffold is in place (`mail42 version` / `mail42 help`). The reader, sync, read verbs, plugin
-> and skills land in the following changes tracked in Linear WOR-438.
+> Status: in progress (Linear WOR-438). Working today: `permissions`, `sync` and `config`. Still to come: the
+> read verbs (`mailbox`, `envelope`, `message`, `attachment`, `open`), the Work42 plugin and its skills.
 
 ## Install
 
@@ -44,12 +44,33 @@ ad-hoc builds (`swift build`) have a different signature each time, so macOS may
 | `~/.work42/mail42/trace.jsonl` | one JSON line per sync outcome |
 | `~/Library/Mail/V*/` | Apple Mail's own store. **Only ever read**, never written |
 
+## Sync and settings
+
+```bash
+mail42 sync                      # copy new / changed / removed mail from Apple Mail into mail.db
+mail42 sync --full               # re-index everything in the window
+mail42 config get                # window_days=90
+mail42 config set window_days 30 # index the last 30 days (0 = all mail); applies at the next sync
+```
+
+`sync` indexes messages received within `window_days` (default 90), one per Message-ID (Gmail's label copies
+collapse to one), with their bodies in a full-text index. It exits 1 when mail42 can't read Apple Mail (no Full
+Disk Access, or an Apple Mail index this version doesn't understand) and leaves `mail.db` untouched.
+
 ## Develop
 
 ```bash
 swift build
 swift test
 scripts/install-local.sh        # sign with your Developer ID and install to ~/.work42/mail42.app
+```
+
+Two environment variables redirect mail42 for testing (`$HOME` is **not** honoured): `MAIL42_ROOT` replaces
+`~/.work42/mail42` (mail.db, trace.jsonl) and `MAIL42_MAIL_LIBRARY` replaces `~/Library/Mail`. The end-to-end
+tests set both, so they can never touch your real mail or index:
+
+```bash
+MAIL42_ROOT=/tmp/m42 MAIL42_MAIL_LIBRARY=/tmp/fake-mail mail42 sync
 ```
 
 `scripts/build-mail42.sh` builds the signed app bundle (ad-hoc when `DEVELOPER_ID` is unset).

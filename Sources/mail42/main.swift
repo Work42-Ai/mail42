@@ -19,13 +19,17 @@ enum Dispatcher {
 
     /// Verbs that exist in the CLI surface but are implemented by later sub-issues of WOR-438.
     private static let notImplementedYet: Set<String> = [
-        "mailbox", "envelope", "message", "attachment", "open", "sync", "config",
+        "mailbox", "envelope", "message", "attachment", "open",
     ]
 
     static func run(command: String, args: [String]) {
         switch command {
         case "permissions":
             PermissionsCommand.run(args: args)
+        case "sync":
+            SyncCommand.run(args: args)
+        case "config":
+            ConfigCommand.run(args: args)
         case "version", "--version", "-v":
             print("mail42 v\(mail42Version)")
         case "help", "--help", "-h", "":

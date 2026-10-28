@@ -196,8 +196,43 @@ public final class EnvelopeIndexBuilder {
         try conn.query("UPDATE messages SET read = ? WHERE ROWID = ?", [.int(read ? 1 : 0), .int(rowid)]) { _ in }
     }
 
+    public func setFlagged(rowid: Int64, _ flagged: Bool) throws {
+        try conn.query("UPDATE messages SET flagged = ? WHERE ROWID = ?", [.int(flagged ? 1 : 0), .int(rowid)]) { _ in }
+    }
+
+    /// Marks a message deleted the way Mail does (the row stays, `deleted = 1`).
+    public func setDeleted(rowid: Int64, _ deleted: Bool) throws {
+        try conn.query("UPDATE messages SET deleted = ? WHERE ROWID = ?", [.int(deleted ? 1 : 0), .int(rowid)]) { _ in }
+    }
+
+    public func moveMessage(rowid: Int64, toMailbox mailboxID: Int64) throws {
+        try conn.query("UPDATE messages SET mailbox = ? WHERE ROWID = ?", [.int(mailboxID), .int(rowid)]) { _ in }
+    }
+
     public func deleteMessage(rowid: Int64) throws {
         try conn.query("DELETE FROM messages WHERE ROWID = ?", [.int(rowid)]) { _ in }
+    }
+
+    /// Runs many inserts in one transaction (a thousand autocommitted inserts are needlessly slow).
+    public func inTransaction(_ body: () throws -> Void) throws {
+        try conn.execute("BEGIN")
+        do {
+            try body()
+            try conn.execute("COMMIT")
+        } catch {
+            try? conn.execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Writes `MailData/Signatures/AccountsMap.plist`, which is where Mail records each account's address.
+    public func writeAccountsMap(email: String) throws {
+        let dir = mailRoot.appendingPathComponent("MailData/Signatures", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let encoded = email.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? email
+        let plist: [String: Any] = [Self.accountUUID: ["AccountURL": "imap://\(encoded)/"]]
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try data.write(to: dir.appendingPathComponent("AccountsMap.plist"))
     }
 
     private func id(

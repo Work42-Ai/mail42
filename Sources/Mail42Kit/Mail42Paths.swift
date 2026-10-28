@@ -6,9 +6,25 @@ import Foundation
 
 public enum Mail42Paths {
 
-    /// `~/.work42/mail42`.
-    public static var root: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+    /// Environment overrides, for tests and for pointing mail42 at a copy of a mail store. They exist because
+    /// `$HOME` is NOT honoured (Foundation reads the home directory from the user database), so without them
+    /// there is no way to run the CLI against a sandbox.
+    public enum Override {
+        /// Replaces `~/.work42/mail42` (where mail.db and trace.jsonl live).
+        public static let root = "MAIL42_ROOT"
+        /// Replaces `~/Library/Mail` (the folder holding Apple Mail's `V10`).
+        public static let mailLibrary = "MAIL42_MAIL_LIBRARY"
+    }
+
+    /// `~/.work42/mail42`, or `$MAIL42_ROOT` when set.
+    public static var root: URL { root(environment: ProcessInfo.processInfo.environment) }
+
+    /// `root` for an explicit environment, so the rule is testable.
+    public static func root(environment: [String: String]) -> URL {
+        if let path = environment[Override.root], !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".work42", isDirectory: true)
             .appendingPathComponent("mail42", isDirectory: true)
     }
@@ -26,9 +42,15 @@ public enum Mail42Paths {
         return root
     }
 
-    /// `~/Library/Mail`, the parent of Apple Mail's versioned store.
-    public static var appleMailLibrary: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+    /// `~/Library/Mail`, the parent of Apple Mail's versioned store, or `$MAIL42_MAIL_LIBRARY` when set.
+    public static var appleMailLibrary: URL { appleMailLibrary(environment: ProcessInfo.processInfo.environment) }
+
+    /// `appleMailLibrary` for an explicit environment, so the rule is testable.
+    public static func appleMailLibrary(environment: [String: String]) -> URL {
+        if let path = environment[Override.mailLibrary], !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("Mail", isDirectory: true)
     }
