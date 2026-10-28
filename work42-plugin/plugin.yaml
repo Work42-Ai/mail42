@@ -10,3 +10,4 @@ author: work42
 sdk_version: 2.10.0
 sdk_abi: 14
 requires: []
+global_skills: mail42-setup, mail42-cli
