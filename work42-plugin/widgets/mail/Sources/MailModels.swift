@@ -6,7 +6,7 @@
 
 import Foundation
 
-nonisolated struct MailPerson: Codable, Equatable {
+nonisolated struct MailPerson: Codable, Equatable, Sendable {
     let name: String?
     let addr: String?
 
@@ -30,7 +30,7 @@ nonisolated struct MailPerson: Codable, Equatable {
     }
 }
 
-nonisolated struct MailAccountRef: Codable, Equatable {
+nonisolated struct MailAccountRef: Codable, Equatable, Sendable {
     let id: String
     let name: String
     let email: String?
@@ -38,14 +38,14 @@ nonisolated struct MailAccountRef: Codable, Equatable {
     var label: String { email ?? name }
 }
 
-nonisolated struct MailMailboxRef: Codable, Equatable {
+nonisolated struct MailMailboxRef: Codable, Equatable, Sendable {
     let id: Int64
     let name: String
     let role: String
 }
 
 /// One message summary: `mail42 envelope list --json` / `envelope search --json`.
-nonisolated struct MailEnvelope: Codable, Identifiable, Equatable {
+nonisolated struct MailEnvelope: Codable, Identifiable, Equatable, Sendable {
     let id: Int64
     let messageID: String?
     let conversationID: Int64?
@@ -72,8 +72,8 @@ nonisolated struct MailEnvelope: Codable, Identifiable, Equatable {
 }
 
 /// `mail42 mailbox list --json`: one account with its mailboxes.
-nonisolated struct MailAccountTree: Codable, Equatable, Identifiable {
-    struct Account: Codable, Equatable {
+nonisolated struct MailAccountTree: Codable, Equatable, Identifiable, Sendable {
+    struct Account: Codable, Equatable, Sendable {
         let id: String
         let name: String
         let email: String?
@@ -87,7 +87,7 @@ nonisolated struct MailAccountTree: Codable, Equatable, Identifiable {
     var label: String { account.email ?? account.name }
 }
 
-nonisolated struct MailMailbox: Codable, Equatable, Identifiable {
+nonisolated struct MailMailbox: Codable, Equatable, Identifiable, Sendable {
     let id: Int64
     let name: String
     let role: String
@@ -95,7 +95,7 @@ nonisolated struct MailMailbox: Codable, Equatable, Identifiable {
     let unread: Int64
 }
 
-nonisolated struct MailAttachment: Codable, Equatable, Identifiable {
+nonisolated struct MailAttachment: Codable, Equatable, Identifiable, Sendable {
     let part: String
     let filename: String
     let mime: String
@@ -105,7 +105,7 @@ nonisolated struct MailAttachment: Codable, Equatable, Identifiable {
 }
 
 /// `mail42 message read <id> --html --out <file> --json`.
-nonisolated struct MailReadResult: Codable, Equatable {
+nonisolated struct MailReadResult: Codable, Equatable, Sendable {
     let path: String?
     let bodyUnavailable: Bool
 
@@ -115,59 +115,8 @@ nonisolated struct MailReadResult: Codable, Equatable {
     }
 }
 
-/// `mail42 sync --json`.
-nonisolated struct MailSyncSummary: Codable, Equatable {
-    let added: Int
-    let updated: Int
-    let removed: Int
-}
-
-/// The live progress of a running `mail42 sync`, which the CLI keeps in `~/.work42/mail42/sync-status.json`.
-/// `current()` is nil unless a sync is really running (a crashed sync leaves a stale file behind).
-nonisolated struct MailSyncProgress: Decodable, Equatable {
-    let state: String
-    let phase: String?
-    let pid: Int32?
-    let started: Date?
-    let updated: Date?
-    let processed: Int
-    let total: Int?
-
-    /// A "running" file nobody has touched for this long is dead.
-    static let staleAfter: TimeInterval = 600
-
-    private static var fileURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".work42/mail42/sync-status.json")
-    }
-
-    /// 0…1 once the total is known.
-    var fraction: Double? {
-        guard let total, total > 0 else { return nil }
-        return min(1, Double(processed) / Double(total))
-    }
-
-    /// A rough time left, from how fast this run has gone so far. Nil until there is enough to go on.
-    func secondsLeft(now: Date = Date()) -> Int? {
-        guard let started, let total, processed >= 100, total > processed else { return nil }
-        let elapsed = now.timeIntervalSince(started)
-        guard elapsed > 5 else { return nil }
-        return Int((Double(total - processed) / (Double(processed) / elapsed)).rounded())
-    }
-
-    static func current(now: Date = Date()) -> MailSyncProgress? {
-        guard let data = try? Data(contentsOf: fileURL) else { return nil }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let status = try? decoder.decode(MailSyncProgress.self, from: data), status.state == "running"
-        else { return nil }
-        if let last = status.updated ?? status.started, now.timeIntervalSince(last) > staleAfter { return nil }
-        if let pid = status.pid, kill(pid, 0) != 0, errno != EPERM { return nil }
-        return status
-    }
-}
-
 /// `mail42 permissions --json` (the exit code carries granted / not granted; this is for the details).
-nonisolated struct MailPermissionsReport: Codable, Equatable {
+nonisolated struct MailPermissionsReport: Codable, Equatable, Sendable {
     let fullDiskAccess: String
 }
 

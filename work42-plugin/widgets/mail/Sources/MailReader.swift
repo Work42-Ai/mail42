@@ -60,7 +60,7 @@ private struct MailMessageHeader: View {
                     }
                 }
                 Spacer(minLength: DT.s8)
-                Text(envelope.date.formatted(date: .abbreviated, time: .shortened))
+                Text(MailDates.full.string(from: envelope.date))
                     .font(.system(size: DT.f10)).foregroundStyle(.secondary)
             }
             if !attachments.isEmpty {
@@ -101,8 +101,8 @@ private struct MailBodyView: View {
         case .unavailable:
             MailPlaceholder(
                 symbol: "arrow.down.circle", title: "This message isn\u{2019}t downloaded",
-                text: "Apple Mail hasn\u{2019}t fetched its body yet. Open it in Mail to download it, then Sync.")
-        case .fdaDenied:
+                text: "Apple Mail hasn\u{2019}t fetched its body yet. Open it in Mail to download it.")
+        case .needsAccess:
             MailPlaceholder(
                 symbol: "lock.shield", title: "mail42 can\u{2019}t read this message",
                 text: "Full Disk Access isn\u{2019}t granted to mail42.")

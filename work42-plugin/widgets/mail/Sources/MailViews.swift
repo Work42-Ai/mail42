@@ -13,26 +13,17 @@ struct MailBody: View {
         Group {
             switch model.state {
             case .loading:
-                ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+                MailSkeleton()
             case .notInstalled:
                 MailPlaceholder(
                     symbol: "terminal", title: "mail42 isn\u{2019}t installed",
                     text: "Ask the agent in a session to set up mail42: it installs the tool and walks you through Full Disk Access.")
-            case .fdaDenied:
+            case .needsAccess:
                 MailAccessView(model: model)
-            case .noAccounts where model.progress != nil:
-                // The index is empty only because the first sync is still running.
-                MailLoadingView(progress: model.progress)
-            case .noAccounts:
-                VStack(spacing: DT.s8) {
-                    MailPlaceholder(
-                        symbol: "tray", title: "No Mail accounts found",
-                        text: "Add an account in Apple Mail, or run a sync if you just did.")
-                    HStack {
-                        Button("Sync now") { Task { await model.syncNow() } }.glassSubtleCapsule(tint: DT.systemAccent)
-                        Button("Check again") { Task { await model.bootstrap() } }.glassPlainCapsule()
-                    }
-                }
+            case .noMail:
+                MailPlaceholder(
+                    symbol: "tray", title: "No Mail accounts found",
+                    text: "Add an account in Apple Mail and it shows up here by itself.")
             case .failed(let message):
                 VStack(spacing: DT.s8) {
                     MailPlaceholder(symbol: "exclamationmark.triangle", title: "Couldn\u{2019}t read your mail", text: message)
@@ -47,109 +38,107 @@ struct MailBody: View {
         .onDisappear { model.stop() }
         // A switch flipped in System Settings shows up as soon as the user is back.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            model.recheckIfBlocked()
+            model.recheckNow()
         }
     }
 }
 
-/// "Loading your mail…": shown while the first sync fills the index. Determinate once the total is known.
-struct MailLoadingView: View {
-    let progress: MailSyncProgress?
-    var compact = false
+// MARK: - Loading skeleton
+
+/// The tile's shape while the first read runs: grey rows where messages will be, a quiet shimmer, no spinner.
+struct MailSkeleton: View {
+    @State private var dim = false
 
     var body: some View {
-        VStack(spacing: DT.s12) {
-            Image(systemName: "envelope.fill")
-                .font(.system(size: compact ? 18 : 24))
-                .foregroundStyle(Color.accentColor)
-                .symbolEffect(.pulse)
-                .frame(width: compact ? 38 : 50, height: compact ? 38 : 50)
-                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(DT.chipFill))
-            Text("Loading your mail…").font(.system(size: DT.f12, weight: .semibold))
-            if let fraction = progress?.fraction {
-                ProgressView(value: fraction)
-                    .progressViewStyle(.linear)
-                    .frame(maxWidth: compact ? 180 : 260)
-            } else {
-                ProgressView().controlSize(.small)
-            }
-            Text(MailLoadingText.detail(progress))
-                .font(.system(size: DT.f10))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            if !compact {
-                Text("The first sync copies the last 90 days into a local index. After that, syncing takes seconds.")
-                    .font(.system(size: DT.f9))
-                    .foregroundStyle(.tertiary)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: 300)
-            }
-        }
-        .padding(DT.s20)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-/// A thin strip above the list while more mail is still arriving.
-struct MailSyncStrip: View {
-    let progress: MailSyncProgress
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.mini)
-                Text("Syncing · " + MailLoadingText.detail(progress))
-                    .font(.system(size: DT.f10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                RoundedRectangle(cornerRadius: 8, style: .continuous).fill(DT.chipFill)
+                    .frame(height: 28).padding(DT.s8)
+                Divider().opacity(0.4)
+                ForEach(0..<8, id: \.self) { index in
+                    HStack(alignment: .top, spacing: 6) {
+                        Circle().fill(DT.chipFill).frame(width: 7, height: 7).padding(.top, 5)
+                        VStack(alignment: .leading, spacing: 5) {
+                            bar(width: 90 + CGFloat(index % 3) * 30, height: 9)
+                            bar(width: 170 + CGFloat(index % 4) * 20, height: 8)
+                            bar(width: 130, height: 7)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, DT.s8).padding(.vertical, 8)
+                    Divider().opacity(0.25)
+                }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, DT.s12)
-            .padding(.vertical, 4)
-            if let fraction = progress.fraction {
-                ProgressView(value: fraction).progressViewStyle(.linear).controlSize(.mini)
+            .frame(minWidth: 230, idealWidth: 290, maxWidth: 340)
+            Divider().opacity(0.5)
+            VStack(spacing: DT.s8) {
+                Image(systemName: "envelope.open").font(.system(size: 22)).foregroundStyle(.tertiary)
+                Text("Reading your mail\u{2026}").font(.system(size: DT.f11)).foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(DT.chipFill)
+        .opacity(dim ? 0.55 : 1)
+        .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: dim)
+        .onAppear { dim = true }
+    }
+
+    private func bar(width: CGFloat, height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 3, style: .continuous).fill(DT.chipFill).frame(width: width, height: height)
     }
 }
 
-/// The words for a progress: "3,500 of 5,366 messages · about 1 min left".
-enum MailLoadingText {
-    static func detail(_ progress: MailSyncProgress?) -> String {
-        guard let progress else { return "Starting…" }
-        guard let total = progress.total else { return "Reading Apple Mail…" }
-        guard total > 0 else { return "Checking for changes…" }
-        var text = "\(progress.processed.formatted()) of \(total.formatted()) messages"
-        if let seconds = progress.secondsLeft() { text += " · " + timeLeft(seconds) }
-        return text
-    }
+// MARK: - Full Disk Access, guided
 
-    static func timeLeft(_ seconds: Int) -> String {
-        if seconds < 45 { return "less than a minute left" }
-        let minutes = Int((Double(seconds) / 60).rounded())
-        return minutes <= 1 ? "about 1 min left" : "about \(minutes) min left"
-    }
-}
-
-/// The Full Disk Access empty state.
+/// The first-run setup: three numbered steps, and the tile moves on by itself once access is granted.
 private struct MailAccessView: View {
     let model: MailModel
 
     var body: some View {
-        VStack(spacing: DT.s8) {
-            MailPlaceholder(
-                symbol: "lock.shield", title: "Allow mail42 to read Mail",
-                text: "Apple Mail keeps your messages in a protected folder. Turn on mail42 under Privacy & Security \u{203A} Full Disk Access. It only reads; it never changes your mail.")
-            HStack {
-                Button("Open Settings") { Task { await model.openFullDiskAccessSettings() } }
-                    .glassSubtleCapsule(tint: DT.systemAccent)
-                Button("Check again") { Task { await model.bootstrap() } }.glassPlainCapsule()
+        VStack(spacing: DT.s12) {
+            Image(systemName: "lock.shield")
+                .font(.system(size: 24))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 50, height: 50)
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(DT.chipFill))
+            Text("Let mail42 read your Mail").font(.system(size: DT.f12, weight: .semibold))
+            Text("Apple Mail keeps messages in a protected folder. mail42 only reads them, and keeps no copy.")
+                .font(.system(size: DT.f10)).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center).frame(maxWidth: 320)
+            VStack(alignment: .leading, spacing: DT.s8) {
+                step(1, "Open Privacy & Security \u{203A} Full Disk Access") {
+                    Button("Open Settings") { Task { await model.openFullDiskAccessSettings() } }
+                        .glassSubtleCapsule(tint: DT.systemAccent)
+                }
+                step(2, "Turn on mail42. If it isn\u{2019}t listed, press + and choose mail42 in your .work42 folder.") { EmptyView() }
+                step(3, "Come back here. This continues by itself.") {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.mini)
+                        Text("Waiting for access\u{2026}").font(.system(size: DT.f10)).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .frame(maxWidth: 360, alignment: .leading)
+        }
+        .padding(DT.s20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func step<Extra: View>(_ number: Int, _ text: String, @ViewBuilder extra: () -> Extra) -> some View {
+        HStack(alignment: .top, spacing: DT.s8) {
+            Text("\(number)")
+                .font(.system(size: DT.f10, weight: .semibold))
+                .frame(width: 18, height: 18)
+                .background(Circle().fill(DT.chipFill))
+            VStack(alignment: .leading, spacing: 6) {
+                Text(text).font(.system(size: DT.f11)).fixedSize(horizontal: false, vertical: true)
+                extra()
             }
         }
     }
 }
+
+// MARK: - Split
 
 private struct MailSplit: View {
     let model: MailModel
@@ -157,9 +146,6 @@ private struct MailSplit: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if let progress = model.progress, !model.envelopes.isEmpty {
-                MailSyncStrip(progress: progress)
-            }
             if let notice = model.notice {
                 Text(notice)
                     .font(.system(size: DT.f10))
@@ -192,6 +178,7 @@ private struct MailListPane: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: DT.f11))
                     .onSubmit { push() }
+                if model.isRefreshing { ProgressView().controlSize(.mini) }
                 if !text.isEmpty {
                     Button {
                         text = ""
@@ -210,18 +197,19 @@ private struct MailListPane: View {
 
             Divider().opacity(0.4)
 
-            if model.envelopes.isEmpty, model.progress != nil {
-                MailLoadingView(progress: model.progress, compact: true)
+            if model.envelopes.isEmpty, model.isRefreshing {
+                MailSkeletonRows()
             } else if model.envelopes.isEmpty {
                 MailPlaceholder(
                     symbol: "tray",
                     title: model.query.isEmpty ? "Nothing here" : "No matches",
-                    text: model.query.isEmpty ? "No messages in this view yet." : "Nothing matches that search.")
+                    text: model.query.isEmpty ? "No messages in this view." : "Nothing matches that search.")
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(model.envelopes) { envelope in
                             MailRow(envelope: envelope, selected: envelope.id == model.selectedID)
+                                .equatable()
                                 .contentShape(Rectangle())
                                 .onTapGesture { model.select(envelope.id) }
                                 .onAppear { model.loadMoreIfNeeded(current: envelope) }
@@ -240,7 +228,24 @@ private struct MailListPane: View {
     }
 }
 
-private struct MailRow: View {
+/// Grey rows shown in the list while a new view loads and the old one has nothing to keep on screen.
+private struct MailSkeletonRows: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<6, id: \.self) { index in
+                VStack(alignment: .leading, spacing: 5) {
+                    RoundedRectangle(cornerRadius: 3).fill(DT.chipFill).frame(width: 90 + CGFloat(index % 3) * 30, height: 9)
+                    RoundedRectangle(cornerRadius: 3).fill(DT.chipFill).frame(width: 170, height: 8)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, DT.s12).padding(.vertical, 9)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+private struct MailRow: View, Equatable {
     let envelope: MailEnvelope
     let selected: Bool
 
@@ -258,7 +263,7 @@ private struct MailRow: View {
                     Spacer(minLength: 4)
                     if envelope.isFlagged { Image(systemName: "flag.fill").font(.system(size: 9)).foregroundStyle(.orange) }
                     if envelope.hasAttachments { Image(systemName: "paperclip").font(.system(size: 9)).foregroundStyle(.secondary) }
-                    Text(Self.shortDate(envelope.date)).font(.system(size: DT.f9)).foregroundStyle(.secondary)
+                    Text(MailDates.short(envelope.date)).font(.system(size: DT.f9)).foregroundStyle(.secondary)
                 }
                 Text(envelope.subject.isEmpty ? "(no subject)" : envelope.subject)
                     .font(.system(size: DT.f10, weight: envelope.isRead ? .regular : .medium))
@@ -273,15 +278,29 @@ private struct MailRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(selected ? Color.accentColor.opacity(0.16) : Color.clear)
     }
+}
+
+/// Date formatters are expensive to build, so each is made once.
+enum MailDates {
+    private static let time: DateFormatter = {
+        let f = DateFormatter(); f.dateStyle = .none; f.timeStyle = .short; return f
+    }()
+    private static let dayMonth: DateFormatter = {
+        let f = DateFormatter(); f.setLocalizedDateFormatFromTemplate("d MMM"); return f
+    }()
+    private static let dayMonthYear: DateFormatter = {
+        let f = DateFormatter(); f.setLocalizedDateFormatFromTemplate("d MMM y"); return f
+    }()
+    static let full: DateFormatter = {
+        let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short; return f
+    }()
 
     /// Today: the time. This year: day and month. Older: with the year.
-    static func shortDate(_ date: Date) -> String {
+    static func short(_ date: Date) -> String {
         let calendar = Calendar.current
-        if calendar.isDateInToday(date) { return date.formatted(date: .omitted, time: .shortened) }
+        if calendar.isDateInToday(date) { return time.string(from: date) }
         if calendar.isDateInYesterday(date) { return "Yesterday" }
-        if calendar.isDate(date, equalTo: Date(), toGranularity: .year) {
-            return date.formatted(.dateTime.day().month(.abbreviated))
-        }
-        return date.formatted(.dateTime.day().month(.abbreviated).year())
+        if calendar.isDate(date, equalTo: Date(), toGranularity: .year) { return dayMonth.string(from: date) }
+        return dayMonthYear.string(from: date)
     }
 }

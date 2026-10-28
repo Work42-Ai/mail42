@@ -1,7 +1,7 @@
 // MailWidget.swift — mail42's Mail widget (WOR-443): a lightweight, read-only reader over Apple Mail.
 //
-// Everything comes from the `mail42` CLI. The tab-bar row carries the controls (mailbox menu, Unread, Sync, Open in
-// Mail); the tile itself is a message list beside the rendered message. Links only Work42PluginKit + Work42UI.
+// Everything comes from the `mail42` CLI, which reads Apple Mail live. The tab-bar row carries the controls (mailbox
+// menu, Unread, Open in Mail); the tile itself is a message list beside the rendered message. Links only Work42PluginKit + Work42UI.
 
 import AppKit
 import Observation
@@ -11,7 +11,7 @@ import Work42PluginKit
 
 @MainActor
 @Observable
-final class MailWidget: Work42Widget, Work42WidgetCustomHeader, Work42WidgetBackground {
+final class MailWidget: Work42Widget, Work42WidgetCustomHeader {
 
     let id = "mail"
     let title = "Mail"
@@ -45,13 +45,6 @@ final class MailWidget: Work42Widget, Work42WidgetCustomHeader, Work42WidgetBack
                 isConfirmed: { [model] in model.unreadOnly },
                 performWithServices: { [model] _ in model.toggleUnread() }),
             WidgetIntentSpec(
-                name: "sync", title: "Sync Mail", icon: "arrow.clockwise",
-                keywords: ["refresh", "fetch"],
-                placement: [.palette, .actionArea],
-                actionAreaStyle: .icon,
-                isEnabled: { [model] in !model.isSyncing },
-                perform: { [model] in await model.syncNow() }),
-            WidgetIntentSpec(
                 name: "open-in-mail", title: "Open in Mail", icon: "arrow.up.forward.app",
                 keywords: ["reply", "archive", "mail.app"],
                 placement: [.palette, .actionArea],
@@ -77,7 +70,6 @@ final class MailWidget: Work42Widget, Work42WidgetCustomHeader, Work42WidgetBack
         AnyView(MailHeader(model: model))
     }
 
-    func makeBackgroundAgent() -> any WidgetBackgroundAgent { MailSyncAgent() }
 }
 
 private struct MailHeader: View {
@@ -93,7 +85,6 @@ private struct MailHeader: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer(minLength: DT.s8)
-            if model.isSyncing { ProgressView().controlSize(.small) }
         }
     }
 }
