@@ -145,7 +145,8 @@ public final class MailStore {
 
     public static let defaultWindowDays = 90
 
-    private let db: SQLiteConnection
+    /// The connection. Internal so the read queries in `MailStore+Read.swift` can share it.
+    let db: SQLiteConnection
 
     /// Opens (creating if needed) the store at `path`, switches it to WAL mode and migrates the schema.
     public init(path: URL = Mail42Paths.db) throws {

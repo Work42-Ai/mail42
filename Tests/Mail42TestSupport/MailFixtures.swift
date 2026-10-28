@@ -80,6 +80,15 @@ public enum MailFixtures {
         ])
     }
 
+    /// A `.partial.emlx` for a message whose body Mail never downloaded: headers only.
+    public static func partialWithoutBody(messageID: String = "<partial-2@example.com>") -> String {
+        crlf([
+            "From: QA Empty <qa-empty@example.com>", "To: Yan <yan@example.com>", "Subject: partial no body",
+            "Date: Mon, 27 Oct 2026 14:00:00 +0000", "Message-ID: \(messageID)",
+            "Content-Type: text/plain; charset=utf-8", "", "",
+        ])
+    }
+
     /// The same message as Mail stores it after externalising the attachment (a `.partial.emlx`): headers and
     /// text are there, the attachment part has no bytes.
     public static func partialWithAttachment(messageID: String = "<attach-2@example.com>") -> String {

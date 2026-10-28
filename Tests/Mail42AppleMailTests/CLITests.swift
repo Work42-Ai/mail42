@@ -38,7 +38,13 @@ import Mail42TestSupport
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         .appendingPathComponent(".build/debug/mail42")
 
-    private static var available: Bool { FileManager.default.isExecutableFile(atPath: binary.path) }
+    /// True when the built `mail42` binary is there. When it isn't, the test FAILS rather than passing without
+    /// having tested anything (the test target depends on the executable, so it should always exist).
+    private static func requireBinary() -> Bool {
+        if FileManager.default.isExecutableFile(atPath: binary.path) { return true }
+        Issue.record("the mail42 binary isn't built at \(binary.path): the end-to-end tests have nothing to run")
+        return false
+    }
 
     private func run(_ args: [String], in sandbox: Sandbox) throws -> Run {
         let process = Process()
@@ -86,7 +92,7 @@ import Mail42TestSupport
     // MARK: - config
 
     @Test func configReadsAndWritesTheWindow() throws {
-        guard Self.available else { return }
+        guard Self.requireBinary() else { return }
         let sandbox = Sandbox()
         defer { sandbox.cleanup() }
 
@@ -117,7 +123,7 @@ import Mail42TestSupport
         ["config", "set", "window_days", "1.5"],
     ])
     func configRejectsBadInput(_ args: [String]) throws {
-        guard Self.available else { return }
+        guard Self.requireBinary() else { return }
         let sandbox = Sandbox()
         defer { sandbox.cleanup() }
         let result = try run(args + ["--json"], in: sandbox)
@@ -130,7 +136,7 @@ import Mail42TestSupport
     // MARK: - sync
 
     @Test func syncIndexesThenReportsNothingNew() throws {
-        guard Self.available else { return }
+        guard Self.requireBinary() else { return }
         let mail = try EnvelopeIndexBuilder()
         defer { mail.cleanup() }
         try seedMail(mail)
@@ -160,7 +166,7 @@ import Mail42TestSupport
     }
 
     @Test func syncPicksUpChangesMadeInMail() throws {
-        guard Self.available else { return }
+        guard Self.requireBinary() else { return }
         let mail = try EnvelopeIndexBuilder()
         defer { mail.cleanup() }
         try seedMail(mail)
@@ -176,7 +182,7 @@ import Mail42TestSupport
     }
 
     @Test func theWindowSettingAppliesToTheNextSync() throws {
-        guard Self.available else { return }
+        guard Self.requireBinary() else { return }
         let mail = try EnvelopeIndexBuilder()
         defer { mail.cleanup() }
         try mail.addMailbox(id: 1, url: EnvelopeIndexBuilder.mailboxURL(["INBOX"]))
@@ -194,7 +200,7 @@ import Mail42TestSupport
     }
 
     @Test func syncWithoutAppleMailDataExitsOneAndCreatesNothing() throws {
-        guard Self.available else { return }
+        guard Self.requireBinary() else { return }
         let sandbox = Sandbox()                                     // library folder doesn't exist
         defer { sandbox.cleanup() }
         let result = try run(["sync", "--json"], in: sandbox)
@@ -207,7 +213,7 @@ import Mail42TestSupport
     }
 
     @Test func syncWithoutFullDiskAccessExitsOneAndLeavesMailDBAlone() throws {
-        guard Self.available, getuid() != 0 else { return }
+        guard Self.requireBinary(), getuid() != 0 else { return }
         let mail = try EnvelopeIndexBuilder()
         defer { mail.cleanup() }
         try seedMail(mail)
@@ -224,7 +230,7 @@ import Mail42TestSupport
     }
 
     @Test func syncRefusesAnIndexItDoesNotUnderstand() throws {
-        guard Self.available else { return }
+        guard Self.requireBinary() else { return }
         let mail = try EnvelopeIndexBuilder(schemaOmitting: ["messages.size"])
         defer { mail.cleanup() }
         try seedMail(mail)
@@ -241,7 +247,7 @@ import Mail42TestSupport
     // MARK: - general
 
     @Test func unknownCommandsExitTwo() throws {
-        guard Self.available else { return }
+        guard Self.requireBinary() else { return }
         let sandbox = Sandbox()
         defer { sandbox.cleanup() }
         #expect(try run(["frobnicate"], in: sandbox).status == 2)

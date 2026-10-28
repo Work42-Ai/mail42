@@ -75,6 +75,51 @@ enum CLI {
         args.filter { !$0.hasPrefix("-") }
     }
 
+    /// Non-flag arguments, skipping the value that follows each flag in `valueFlags` (so
+    /// `search --limit 5 "from:alice"` yields just the query, not `5`).
+    static func positionals(_ args: [String], valueFlags: Set<String>) -> [String] {
+        var result: [String] = []
+        var skipNext = false
+        for arg in args {
+            if skipNext { skipNext = false; continue }
+            if valueFlags.contains(arg) { skipNext = true; continue }
+            if !arg.hasPrefix("-") { result.append(arg) }
+        }
+        return result
+    }
+
+    /// A whole-number flag value, or a usage error. `nil` when the flag is absent.
+    static func intFlag(_ args: [String], _ name: String, min: Int = 0, json: Bool) -> Int? {
+        guard let raw = argValue(args, name) else { return nil }
+        guard let value = Int(raw), value >= min else {
+            fail(code: "usage", message: "\(name) takes a whole number of \(min) or more, not `\(raw)`", exit: 2, json: json)
+        }
+        return value
+    }
+
+    /// The message id argument, or a usage error.
+    static func messageID(_ raw: String?, json: Bool) -> Int64 {
+        guard let raw, let id = Int64(raw), id > 0 else {
+            fail(code: "usage", message: "expected a message id (a number from `envelope list`)", exit: 2, json: json)
+        }
+        return id
+    }
+
+    static func usageError(_ message: String, json: Bool) -> Never {
+        fail(code: "usage", message: message, exit: 2, json: json)
+    }
+
+    /// Prints a JSON value built from dictionaries / arrays / strings / numbers / `NSNull`: sorted keys, readable.
+    static func emitJSONObject(_ value: Any) {
+        do {
+            let data = try JSONSerialization.data(
+                withJSONObject: value, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            print(String(decoding: data, as: UTF8.self))
+        } catch {
+            fail("mail42: JSON encoding failed: \(error)", code: 2)
+        }
+    }
+
     // MARK: - JSON
 
     static func jsonEncoder() -> JSONEncoder {

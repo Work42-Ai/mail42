@@ -17,13 +17,18 @@ Dispatcher.run(command: command, args: rest)
 
 enum Dispatcher {
 
-    /// Verbs that exist in the CLI surface but are implemented by later sub-issues of WOR-438.
-    private static let notImplementedYet: Set<String> = [
-        "mailbox", "envelope", "message", "attachment", "open",
-    ]
-
     static func run(command: String, args: [String]) {
         switch command {
+        case "mailbox":
+            MailboxCommand.run(args: args)
+        case "envelope":
+            EnvelopeCommand.run(args: args)
+        case "message":
+            MessageCommand.run(args: args)
+        case "attachment":
+            AttachmentCommand.run(args: args)
+        case "open":
+            OpenCommand.run(args: args)
         case "permissions":
             PermissionsCommand.run(args: args)
         case "sync":
@@ -34,9 +39,6 @@ enum Dispatcher {
             print("mail42 v\(mail42Version)")
         case "help", "--help", "-h", "":
             printUsage()
-        case _ where notImplementedYet.contains(command):
-            CLI.fail(code: "not_implemented", message: "`\(command)` is not implemented yet",
-                     exit: 2, json: CLI.wantsJSON(args))
         default:
             CLI.warn("mail42: unknown command: \(command)")
             printUsage()

@@ -49,7 +49,9 @@ let package = Package(
         ),
         .testTarget(
             name: "Mail42AppleMailTests",
-            dependencies: ["Mail42AppleMail", "Mail42Kit", "Mail42TestSupport"],
+            // The `mail42` executable is a dependency so `swift test` always builds the binary the
+            // end-to-end tests run; without it they would have nothing to execute.
+            dependencies: ["Mail42AppleMail", "Mail42Kit", "Mail42TestSupport", "mail42"],
             path: "Tests/Mail42AppleMailTests"
         ),
     ]

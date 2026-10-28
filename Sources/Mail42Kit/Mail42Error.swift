@@ -19,6 +19,16 @@ public enum Mail42Error: Error, LocalizedError, Equatable {
     case emlxParseFailed(String)
     /// The `.emlx` for a message isn't on disk (Exchange accounts, or a body Mail never downloaded).
     case emlxNotFound(messageId: Int, path: String)
+    /// No message, mailbox or attachment part with that id.
+    case notFound(String)
+    /// A search query that doesn't parse. `position` is the 0-based character offset of the problem.
+    case badQuery(String, position: Int)
+    /// The message has no Message-ID header, so it can't be opened in Mail.app.
+    case noMessageID(Int64)
+    /// The attachment exists but its bytes were never downloaded by Mail.
+    case attachmentNotDownloaded(String)
+    /// A file couldn't be written (an attachment copy, or a `--out` file).
+    case writeFailed(String)
 
     /// Stable machine-readable code (the `error.code` in `--json` output).
     public var code: String {
@@ -30,6 +40,11 @@ public enum Mail42Error: Error, LocalizedError, Equatable {
         case .queryFailed: return "query_failed"
         case .emlxParseFailed: return "emlx_parse_failed"
         case .emlxNotFound: return "emlx_not_found"
+        case .notFound: return "not_found"
+        case .badQuery: return "bad_query"
+        case .noMessageID: return "no_message_id"
+        case .attachmentNotDownloaded: return "attachment_not_downloaded"
+        case .writeFailed: return "write_failed"
         }
     }
 
@@ -51,6 +66,17 @@ public enum Mail42Error: Error, LocalizedError, Equatable {
             return "Couldn't parse the message file: \(message)"
         case .emlxNotFound(let id, let path):
             return "The message file for message \(id) isn't on disk (\(path))."
+        case .notFound(let what):
+            return "Not found: \(what)."
+        case .badQuery(let message, let position):
+            return "Bad query at position \(position): \(message)"
+        case .noMessageID(let id):
+            return "Message \(id) has no Message-ID header, so it can't be opened in Mail."
+        case .attachmentNotDownloaded(let name):
+            return "The attachment `\(name)` hasn't been downloaded by Mail yet. "
+                + "Open the message in Mail (`mail42 open <id>`) so it fetches it, then try again."
+        case .writeFailed(let message):
+            return "Couldn't write the file: \(message)"
         }
     }
 }

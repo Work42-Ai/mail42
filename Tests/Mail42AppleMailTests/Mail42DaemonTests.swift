@@ -45,7 +45,11 @@ import Testing
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let binary = root.appendingPathComponent(".build/debug/mail42")
-        guard FileManager.default.isExecutableFile(atPath: binary.path) else { return }   // built by `swift build`
+        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
+            // The test target depends on the executable, so a missing binary is a setup failure, not a skip.
+            Issue.record("the mail42 binary isn't built at \(binary.path)")
+            return
+        }
 
         let process = Process()
         process.executableURL = binary
