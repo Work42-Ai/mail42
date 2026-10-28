@@ -81,6 +81,17 @@ public enum Trace {
         append(src: src, event: event, fields: fields, to: Mail42Paths.trace)
     }
 
+    /// The trace is kept to about this size; past it the current file becomes `<name>.1` (replacing the last one).
+    static let maxTraceBytes = 1_000_000
+
+    static func rotateIfLarge(_ file: URL, maxBytes: Int = maxTraceBytes) {
+        let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.intValue ?? 0
+        guard size > maxBytes else { return }
+        let old = file.appendingPathExtension("1")
+        try? FileManager.default.removeItem(at: old)
+        try? FileManager.default.moveItem(at: file, to: old)
+    }
+
     /// The same, to an explicit file (tests).
     public static func append(src: String, event: String, fields: [String: Any], to file: URL) {
         var object: [String: Any] = fields
@@ -94,6 +105,7 @@ public enum Trace {
         do {
             try FileManager.default.createDirectory(
                 at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            rotateIfLarge(file)
             if let handle = try? FileHandle(forWritingTo: file) {
                 defer { try? handle.close() }
                 _ = try? handle.seekToEnd()

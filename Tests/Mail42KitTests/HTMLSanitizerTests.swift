@@ -165,6 +165,20 @@ import Testing
         #expect(out.components(separatedBy: "data-mail42-id").count == 2)
     }
 
+    @Test func documentCarriesACSPThatForbidsScriptButAllowsRemoteImages() throws {
+        let out = HTMLSanitizer.render(message: message(html: "<p>hi</p>"), id: 5)
+        let policy = "Content-Security-Policy"
+        #expect(out.contains(policy))
+        #expect(out.contains("default-src 'none'"))
+        #expect(!out.contains("script-src"))                 // scripts fall under default-src 'none'
+        #expect(out.contains("img-src * data: blob:"))
+        #expect(out.contains("form-action 'none'"))
+        // The policy sits in <head>, before any message content.
+        let head = try #require(out.range(of: policy))
+        let body = try #require(out.range(of: "<body"))
+        #expect(head.lowerBound < body.lowerBound)
+    }
+
     @Test func carriesTheSendersBodyAttributesOntoOurBody() {
         let out = HTMLSanitizer.render(
             message: message(html: "<html><head><title>T</title></head><body bgcolor=\"#eee\" class=\"m\" onload=\"x()\"><p>hi</p></body></html>"),

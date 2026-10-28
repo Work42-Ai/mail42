@@ -62,4 +62,25 @@ import Testing
         #expect(first["added"] as? Int == 3)
         #expect(first["ts"] is String)
     }
+
+    @Test func traceRotatesOnceItGrowsPastTheLimit() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mail42-trace-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("trace.jsonl")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(repeating: 0x61, count: 2_000).write(to: file)
+
+        Trace.rotateIfLarge(file, maxBytes: 1_000)
+
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        let rotated = directory.appendingPathComponent("trace.jsonl.1")
+        #expect(try Data(contentsOf: rotated).count == 2_000)
+
+        // Below the limit nothing moves.
+        try Data(repeating: 0x62, count: 10).write(to: file)
+        Trace.rotateIfLarge(file, maxBytes: 1_000)
+        #expect(FileManager.default.fileExists(atPath: file.path))
+        #expect(try Data(contentsOf: rotated).count == 2_000)
+    }
 }

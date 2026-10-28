@@ -31,7 +31,11 @@ public enum HTMLSanitizer {
         } else {
             inner = ""
         }
+        // The CSP is a second wall behind the sanitiser: no script of any kind can run (default-src 'none' covers
+        // script-src), while remote images, inline styles and fonts still load as they do in Mail.
         return "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">"
+            + "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src * data: blob:; "
+            + "style-src 'unsafe-inline' *; font-src * data:; media-src *; form-action 'none'\">"
             + "<meta name=\"color-scheme\" content=\"light dark\"></head>"
             + "<body data-mail42-id=\"\(id)\"\(bodyAttributes)>\(inner)</body></html>\n"
     }
