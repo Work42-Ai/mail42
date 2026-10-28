@@ -1,37 +1,53 @@
-// QueryCompiler.swift — turns a parsed query into a SQL `WHERE` clause with bound parameters.
+// QueryCompiler.swift — turns a parsed query into a SQL `WHERE` clause over Apple Mail's index, with bound
+// parameters.
 //
-// The clause is written against `envelopes` aliased as `e`. User text never reaches the SQL string: every
-// value is a `?` parameter. Full-text terms (free words, `subject:`, `body:`) become FTS5 `MATCH` subqueries,
-// each value quoted as a phrase (an unquoted hyphen or colon would change an FTS5 query's meaning). The
-// positive full-text terms are also returned as one OR-ed FTS5 expression so results can be ranked by BM25.
+// The clause is written against Apple's `messages` table aliased as `m`, with `subjects` as `s` and the sender's
+// `addresses` row as `a` joined in. User text never reaches the SQL string as SQL: sender, recipient and subject
+// terms are `?` parameters (substring `LIKE`, escaped).
+//
+// Message TEXT is not in Apple's index (it is in the .emlx files, and on current macOS not in Spotlight either), so
+// free words and `body:` are checked by reading messages. SQL can't do that, so a query with such terms compiles
+// twice: once "relaxed", with every text test replaced by what can't exclude a message (a superset to scan), and
+// once for real, where each text test is `m.ROWID IN (…)` over the ids the scan found. The ids are integers, so
+// they are safe to write into the statement.
 
 import Foundation
 
 public struct CompiledQuery: Sendable {
-    /// SQL boolean expression over `envelopes e`.
+    /// SQL boolean expression over `messages m` (+ `subjects s`, sender `addresses a`).
     public let whereSQL: String
     /// Parameters for the `?` placeholders in `whereSQL`, in order.
     public let params: [SQLiteValue]
-    /// OR of the query's positive full-text terms (nil when it has none): rank results by `bm25` against it.
-    public let rankExpression: String?
+    /// The distinct words the query wants found inside messages (free words and `body:` values).
+    public let textTerms: [String]
 }
 
 public struct QueryCompiler {
 
     public let now: Date
     public let calendar: Calendar
+    /// Ids of the mailboxes a name, id or role refers to (for `in:`).
+    private let mailboxIDs: @Sendable (String) -> [Int64]
+    /// For each text term, the ids of the messages whose text contains it. Nil = compile the relaxed superset.
+    private let textMatches: [String: Set<Int64>]?
 
-    public init(now: Date = Date(), calendar: Calendar = .current) {
+    /// - Parameter textMatches: nil compiles the relaxed form used to pick messages to scan; a table compiles the
+    ///   real query, with every text test answered from it.
+    public init(
+        now: Date = Date(), calendar: Calendar = .current,
+        mailboxIDs: @escaping @Sendable (String) -> [Int64] = { _ in [] },
+        textMatches: [String: Set<Int64>]? = nil
+    ) {
         self.now = now
         self.calendar = calendar
+        self.mailboxIDs = mailboxIDs
+        self.textMatches = textMatches
     }
 
     public func compile(_ node: QueryNode) throws -> CompiledQuery {
         var state = State()
         let sql = try build(node, negated: false, state: &state)
-        return CompiledQuery(
-            whereSQL: sql, params: state.params,
-            rankExpression: state.positiveFTS.isEmpty ? nil : state.positiveFTS.joined(separator: " OR "))
+        return CompiledQuery(whereSQL: sql, params: state.params, textTerms: state.terms)
     }
 
     /// Parses and compiles in one step.
@@ -41,7 +57,7 @@ public struct QueryCompiler {
 
     private struct State {
         var params: [SQLiteValue] = []
-        var positiveFTS: [String] = []
+        var terms: [String] = []
     }
 
     // MARK: - AST
@@ -68,35 +84,32 @@ public struct QueryCompiler {
     ) throws -> String {
         switch field {
         case nil:
-            return fullText(column: nil, value: value, negated: negated, state: &state)
+            // A plain word: in the subject, the sender, a recipient or the message text.
+            return "(" + [subjectClause(value, state: &state), senderClause(value, state: &state),
+                          recipientClause(value, state: &state), textClause(value, negated: negated, state: &state)]
+                .joined(separator: " OR ") + ")"
         case .subject?:
-            return fullText(column: "subject", value: value, negated: negated, state: &state)
+            return subjectClause(value, state: &state)
         case .body?:
-            return fullText(column: "body_text", value: value, negated: negated, state: &state)
+            return textClause(value, negated: negated, state: &state)
 
         case .from?:
-            let pattern = "%\(escapeLike(value))%"
-            state.params += [.text(pattern), .text(pattern)]
-            return "(e.from_addr LIKE ? ESCAPE '\\' OR e.from_name LIKE ? ESCAPE '\\')"
-
+            return senderClause(value, state: &state)
         case .to?:
-            let pattern = "%\(escapeLike(value))%"
-            state.params += [.text(pattern), .text(pattern)]
-            return """
-            EXISTS (SELECT 1 FROM recipients r WHERE r.envelope_id = e.id AND r.kind IN ('to', 'cc') \
-            AND (r.addr LIKE ? ESCAPE '\\' OR r.name LIKE ? ESCAPE '\\'))
-            """
+            return recipientClause(value, state: &state)
 
         case .in?:
-            let clause = Self.mailboxClause(matching: value)
-            state.params += clause.params
-            return clause.sql
+            let ids = mailboxIDs(value)
+            guard !ids.isEmpty else { return "0" }
+            let list = ids.map(String.init).joined(separator: ",")
+            // Stored in the mailbox, or (a Gmail label) labelled with it.
+            return "(m.mailbox IN (\(list)) OR EXISTS (SELECT 1 FROM labels l WHERE l.message_id = m.ROWID AND l.mailbox_id IN (\(list))))"
 
         case .is?:
             switch value.lowercased() {
-            case "unread": return "e.is_read = 0"
-            case "read": return "e.is_read = 1"
-            case "flagged": return "e.is_flagged = 1"
+            case "unread": return "m.read = 0"
+            case "read": return "m.read = 1"
+            case "flagged": return "m.flagged = 1"
             default:
                 throw Mail42Error.badQuery("`is:` takes unread, read or flagged, not `\(value)`", position: position)
             }
@@ -105,24 +118,44 @@ public struct QueryCompiler {
             guard value.lowercased() == "attachment" else {
                 throw Mail42Error.badQuery("`has:` takes attachment, not `\(value)`", position: position)
             }
-            return "e.has_attachments = 1"
+            return "EXISTS (SELECT 1 FROM attachments att WHERE att.message = m.ROWID AND att.name IS NOT NULL AND att.name != '')"
 
         case .date?:
             return try dateClause(value, position: position, state: &state)
         }
     }
 
-    // MARK: - Full text
+    // MARK: - Fields
 
-    /// An FTS5 `MATCH` subquery for one term; `column` limits it to one FTS column.
-    private func fullText(column: String?, value: String, negated: Bool, state: inout State) -> String {
-        // A value with no letters or digits has no tokens to match: it matches nothing.
-        guard value.unicodeScalars.contains(where: { CharacterSet.alphanumerics.contains($0) }) else { return "0" }
-        let phrase = "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
-        let expression = column.map { "\($0):\(phrase)" } ?? phrase
-        state.params.append(.text(expression))
-        if !negated { state.positiveFTS.append(expression) }
-        return "e.id IN (SELECT rowid FROM bodies_fts WHERE bodies_fts MATCH ?)"
+    private func subjectClause(_ value: String, state: inout State) -> String {
+        state.params.append(.text("%\(escapeLike(value))%"))
+        return "s.subject LIKE ? ESCAPE '\\'"
+    }
+
+    private func senderClause(_ value: String, state: inout State) -> String {
+        let pattern = "%\(escapeLike(value))%"
+        state.params += [.text(pattern), .text(pattern)]
+        return "(a.address LIKE ? ESCAPE '\\' OR a.comment LIKE ? ESCAPE '\\')"
+    }
+
+    /// To and Cc (types 0 and 1 in Apple's `recipients`).
+    private func recipientClause(_ value: String, state: inout State) -> String {
+        let pattern = "%\(escapeLike(value))%"
+        state.params += [.text(pattern), .text(pattern)]
+        return """
+        EXISTS (SELECT 1 FROM recipients r JOIN addresses ra ON ra.ROWID = r.address \
+        WHERE r.message = m.ROWID AND r.type IN (0, 1) \
+        AND (ra.address LIKE ? ESCAPE '\\' OR ra.comment LIKE ? ESCAPE '\\'))
+        """
+    }
+
+    /// "The message text contains `value`". Relaxed: true where a match could only help the message qualify and
+    /// false where it could only exclude it, so the result is a superset of the real answer.
+    private func textClause(_ value: String, negated: Bool, state: inout State) -> String {
+        if !state.terms.contains(value) { state.terms.append(value) }
+        guard let textMatches else { return negated ? "0" : "1" }
+        let ids = textMatches[value] ?? []
+        return ids.isEmpty ? "0" : "m.ROWID IN (\(ids.map(String.init).joined(separator: ",")))"
     }
 
     /// Escapes `%`, `_` and `\` for a LIKE pattern that uses `ESCAPE '\'`.
@@ -133,20 +166,6 @@ public struct QueryCompiler {
     }
 
     private func escapeLike(_ value: String) -> String { Self.escapeLike(value) }
-
-    /// SQL (over `envelopes e`) for "the message is in the mailbox called `value`". `value` is a mailbox id, a
-    /// name (case-insensitive, `Sent Messages`, or just the leaf of a nested name such as `Work42` for
-    /// `Clients/Work42`), or a role (`inbox`, `sent`, `drafts`, `archive`, `trash`, `junk`). Shared by the
-    /// `in:` search term and `envelope list -m`.
-    static func mailboxClause(matching value: String) -> (sql: String, params: [SQLiteValue]) {
-        (
-            """
-            e.mailbox_id IN (SELECT id FROM mailboxes WHERE id = ? OR lower(name) = lower(?) \
-            OR lower(name) LIKE '%/' || lower(?) ESCAPE '\\' OR role = lower(?))
-            """,
-            [.int(Int64(value) ?? -1), .text(value), .text(escapeLike(value)), .text(value)]
-        )
-    }
 
     // MARK: - Dates
 
@@ -173,11 +192,11 @@ public struct QueryCompiler {
 
         var parts: [String] = []
         if let lower {
-            parts.append("e.date_received >= ?")
+            parts.append("m.date_received >= ?")
             state.params.append(.int(Int64(lower.timeIntervalSince1970)))
         }
         if let upper {
-            parts.append("e.date_received < ?")
+            parts.append("m.date_received < ?")
             state.params.append(.int(Int64(upper.timeIntervalSince1970)))
         }
         return "(" + parts.joined(separator: " AND ") + ")"

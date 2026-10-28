@@ -6,6 +6,7 @@
 // must not launch Mail).
 
 import Foundation
+import Mail42AppleMail
 import Mail42Kit
 
 enum OpenCommand {
@@ -14,7 +15,7 @@ enum OpenCommand {
         let json = CLI.wantsJSON(args)
         let id = CLI.messageID(CLI.positionals(args).first, json: json)
         do {
-            guard let record = try MailStore().envelopeRecord(id: id) else {
+            guard let record = try LiveMail.open().envelopeRecord(id: id) else {
                 throw Mail42Error.notFound("message \(id)")
             }
             guard let messageID = record.row.messageID, let url = MailURL.messageURL(messageID: messageID) else {

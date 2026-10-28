@@ -3,9 +3,9 @@ import Testing
 import Mail42Kit
 import Mail42TestSupport
 
-/// End-to-end tests of the real `mail42` binary (built by `swift build`), run against a sandbox: a temp folder
-/// for mail.db and trace.jsonl (`MAIL42_ROOT`) and a synthetic Apple Mail library (`MAIL42_MAIL_LIBRARY`).
-/// Every run sets both overrides, so none of these tests can touch the user's real ~/.work42/mail42 or mail.
+/// End-to-end tests of the real `mail42` binary (built by `swift build`), run against a synthetic Apple Mail library
+/// (`MAIL42_MAIL_LIBRARY`) and Accounts database (`MAIL42_ACCOUNTS_DB`). Every run sets both overrides, so none of
+/// these tests can touch the user's real mail.
 @Suite struct CLITests {
 
     private struct Run {
@@ -14,24 +14,6 @@ import Mail42TestSupport
         let err: String
         var json: [String: Any]? { (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] }
         var errorCode: String? { (json?["error"] as? [String: Any])?["code"] as? String }
-    }
-
-    private final class Sandbox {
-        let root: URL
-        let library: URL
-        private let folder: URL
-
-        init(library: URL? = nil) {
-            folder = FileManager.default.temporaryDirectory
-                .appendingPathComponent("mail42-cli-\(UUID().uuidString)", isDirectory: true)
-            root = folder.appendingPathComponent("root", isDirectory: true)
-            self.library = library ?? folder.appendingPathComponent("no-mail-here", isDirectory: true)
-        }
-
-        var dbURL: URL { root.appendingPathComponent("mail.db") }
-        var traceURL: URL { root.appendingPathComponent("trace.jsonl") }
-
-        func cleanup() { try? FileManager.default.removeItem(at: folder) }
     }
 
     private static let binary = URL(fileURLWithPath: #filePath)
@@ -46,15 +28,15 @@ import Mail42TestSupport
         return false
     }
 
-    private func run(_ args: [String], in sandbox: Sandbox) throws -> Run {
+    private func run(_ args: [String], library: URL) throws -> Run {
         let process = Process()
         process.executableURL = Self.binary
         process.arguments = args
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: "MAIL42_NO_REEXEC")
         env.removeValue(forKey: "MAIL42_REEXEC")
-        env[Mail42Paths.Override.root] = sandbox.root.path
-        env[Mail42Paths.Override.mailLibrary] = sandbox.library.path
+        env[Mail42Paths.Override.mailLibrary] = library.path
+        env[Mail42Paths.Override.accountsDatabase] = library.deletingLastPathComponent().appendingPathComponent("none.sqlite").path
         process.environment = env
         let out = Pipe(), err = Pipe()
         process.standardOutput = out
@@ -74,185 +56,102 @@ import Mail42TestSupport
             err: String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
     }
 
-    /// Three real messages dated a few minutes ago (the CLI uses the real clock).
-    private func seedMail(_ mail: EnvelopeIndexBuilder) throws {
+    private func missingLibrary() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("mail42-cli-\(UUID().uuidString)/no-mail-here")
+    }
+
+    private func seed(_ mail: EnvelopeIndexBuilder) throws {
         let now = Int64(Date().timeIntervalSince1970)
-        try mail.addMailbox(id: 1, url: EnvelopeIndexBuilder.mailboxURL(["INBOX"]), total: 3, unread: 2)
+        try mail.addMailbox(id: 1, url: EnvelopeIndexBuilder.mailboxURL(["INBOX"]), total: 1, unread: 1)
         try mail.addMessage(.init(rowid: 10, subject: "plain zebrafish", senderAddress: "p@example.com",
                                   mailboxID: 1, dateReceived: now - 300, messageIDHeader: "<plain-1@example.com>"))
-        try mail.addMessage(.init(rowid: 11, subject: "html hostile", senderAddress: "h@example.com",
-                                  mailboxID: 1, dateReceived: now - 400, read: true, messageIDHeader: "<html-1@example.com>"))
-        try mail.addMessage(.init(rowid: 12, subject: "attachment", senderAddress: "a@example.com",
-                                  mailboxID: 1, dateReceived: now - 500, messageIDHeader: "<attach-1@example.com>"))
         try mail.writeEmlx(rowid: 10, data: MailFixtures.emlx(MailFixtures.plain()))
-        try mail.writeEmlx(rowid: 11, data: MailFixtures.emlx(MailFixtures.htmlWithInlineImage()))
-        try mail.writeEmlx(rowid: 12, data: MailFixtures.emlx(MailFixtures.withAttachment()))
     }
 
-    // MARK: - config
+    // MARK: - Failing cleanly
 
-    @Test func configReadsAndWritesTheWindow() throws {
+    /// Every verb that reads Apple Mail, with arguments that are valid, so the failure is about the mail and not the arguments.
+    private static let readVerbs: [[String]] = [
+        ["mailbox", "list"], ["envelope", "list"], ["envelope", "search", "is:unread"], ["message", "read", "10"],
+        ["message", "thread", "10"], ["attachment", "list", "10"], ["open", "10"],
+    ]
+
+    @Test(arguments: readVerbs)
+    func withoutAppleMailDataEveryReadVerbExitsOneAndSaysSo(_ verb: [String]) throws {
         guard Self.requireBinary() else { return }
-        let sandbox = Sandbox()
-        defer { sandbox.cleanup() }
-
-        let initial = try run(["config", "get", "--json"], in: sandbox)
-        #expect(initial.status == 0 && initial.json?["window_days"] as? Int == 90)
-        #expect(try run(["config", "get", "window_days"], in: sandbox).out == "90\n")
-        #expect(try run(["config", "get"], in: sandbox).out == "window_days=90\n")
-
-        let set = try run(["config", "set", "window_days", "30", "--json"], in: sandbox)
-        #expect(set.status == 0 && set.json?["window_days"] as? Int == 30)
-        #expect(try run(["config", "get", "window_days"], in: sandbox).out == "30\n")
-        #expect(try run(["config", "get", "--json"], in: sandbox).json?["window_days"] as? Int == 30)
-        #expect(try MailStore(path: sandbox.dbURL).windowDays() == 30)       // it really is in the sandbox's mail.db
-
-        let all = try run(["config", "set", "window_days", "0"], in: sandbox)
-        #expect(all.status == 0 && all.out.contains("all mail"))
+        let library = missingLibrary()
+        let json = try run(verb + ["--json"], library: library)
+        #expect(json.status == 1 && json.errorCode == "no_mail_data", "\(verb): \(json.out) \(json.err)")
+        let plain = try run(verb, library: library)
+        #expect(plain.status == 1 && plain.err.contains("no_mail_data"))
+        #expect(!FileManager.default.fileExists(atPath: library.path))        // nothing was created
     }
 
-    @Test(arguments: [
-        ["config"],
-        ["config", "frobnicate"],
-        ["config", "get", "nope"],
-        ["config", "set"],
-        ["config", "set", "window_days"],
-        ["config", "set", "nope", "5"],
-        ["config", "set", "window_days", "abc"],
-        ["config", "set", "window_days", "-3"],
-        ["config", "set", "window_days", "1.5"],
-    ])
-    func configRejectsBadInput(_ args: [String]) throws {
-        guard Self.requireBinary() else { return }
-        let sandbox = Sandbox()
-        defer { sandbox.cleanup() }
-        let result = try run(args + ["--json"], in: sandbox)
-        #expect(result.status == 2)
-        #expect(result.errorCode == "usage")
-        // Rejected input never changes the stored value.
-        #expect(try run(["config", "get", "window_days"], in: sandbox).out == "90\n")
-    }
-
-    // MARK: - sync
-
-    @Test func syncIndexesThenReportsNothingNew() throws {
-        guard Self.requireBinary() else { return }
-        let mail = try EnvelopeIndexBuilder()
-        defer { mail.cleanup() }
-        try seedMail(mail)
-        let sandbox = Sandbox(library: mail.library)
-        defer { sandbox.cleanup() }
-
-        let first = try run(["sync", "--json"], in: sandbox)
-        #expect(first.status == 0)
-        #expect(first.json?["added"] as? Int == 3 && first.json?["updated"] as? Int == 0 && first.json?["removed"] as? Int == 0)
-        #expect(first.json?["ms"] is Int)
-        #expect(try MailStore(path: sandbox.dbURL).envelopeCount() == 3)
-
-        let again = try run(["sync", "--json"], in: sandbox)
-        #expect(again.json?["added"] as? Int == 0 && again.json?["updated"] as? Int == 0 && again.json?["removed"] as? Int == 0)
-
-        let human = try run(["sync"], in: sandbox)
-        #expect(human.status == 0)
-        #expect(human.out.hasPrefix("Synced: +0 ~0 -0 in "))
-
-        let full = try run(["sync", "--full", "--json"], in: sandbox)
-        #expect(full.status == 0 && full.json?["added"] as? Int == 0)
-
-        // One trace line per sync, all successes.
-        let lines = try String(contentsOf: sandbox.traceURL, encoding: .utf8).split(separator: "\n")
-        #expect(lines.count == 4)
-        #expect(lines.allSatisfy { $0.contains("\"sync-ok\"") })
-    }
-
-    @Test func syncPicksUpChangesMadeInMail() throws {
-        guard Self.requireBinary() else { return }
-        let mail = try EnvelopeIndexBuilder()
-        defer { mail.cleanup() }
-        try seedMail(mail)
-        let sandbox = Sandbox(library: mail.library)
-        defer { sandbox.cleanup() }
-        _ = try run(["sync"], in: sandbox)
-
-        try mail.setRead(rowid: 10, true)
-        try mail.deleteMessage(rowid: 12)
-        let result = try run(["sync", "--json"], in: sandbox)
-        #expect(result.json?["updated"] as? Int == 1 && result.json?["removed"] as? Int == 1 && result.json?["added"] as? Int == 0)
-        #expect(try MailStore(path: sandbox.dbURL).knownIDs() == [10, 11])
-    }
-
-    @Test func theWindowSettingAppliesToTheNextSync() throws {
-        guard Self.requireBinary() else { return }
-        let mail = try EnvelopeIndexBuilder()
-        defer { mail.cleanup() }
-        try mail.addMailbox(id: 1, url: EnvelopeIndexBuilder.mailboxURL(["INBOX"]))
-        let now = Int64(Date().timeIntervalSince1970)
-        try mail.addMessage(.init(rowid: 1, subject: "recent", senderAddress: "a@b.com", mailboxID: 1, dateReceived: now - 3_600))
-        try mail.addMessage(.init(rowid: 2, subject: "ten days", senderAddress: "a@b.com", mailboxID: 1, dateReceived: now - 10 * 86_400))
-        let sandbox = Sandbox(library: mail.library)
-        defer { sandbox.cleanup() }
-
-        _ = try run(["config", "set", "window_days", "7"], in: sandbox)
-        #expect(try run(["sync", "--json"], in: sandbox).json?["added"] as? Int == 1)
-        _ = try run(["config", "set", "window_days", "30"], in: sandbox)
-        #expect(try run(["sync", "--json"], in: sandbox).json?["added"] as? Int == 1)
-        #expect(try MailStore(path: sandbox.dbURL).knownIDs() == [1, 2])
-    }
-
-    @Test func syncWithoutAppleMailDataExitsOneAndCreatesNothing() throws {
-        guard Self.requireBinary() else { return }
-        let sandbox = Sandbox()                                     // library folder doesn't exist
-        defer { sandbox.cleanup() }
-        let result = try run(["sync", "--json"], in: sandbox)
-        #expect(result.status == 1)
-        #expect(result.errorCode == "no_mail_data")
-        #expect(!FileManager.default.fileExists(atPath: sandbox.dbURL.path))
-        let plain = try run(["sync"], in: sandbox)
-        #expect(plain.status == 1)
-        #expect(plain.err.contains("no_mail_data"))
-    }
-
-    @Test func syncWithoutFullDiskAccessExitsOneAndLeavesMailDBAlone() throws {
+    @Test(arguments: readVerbs)
+    func withoutFullDiskAccessEveryReadVerbExitsOneWithTheFix(_ verb: [String]) throws {
         guard Self.requireBinary(), getuid() != 0 else { return }
         let mail = try EnvelopeIndexBuilder()
         defer { mail.cleanup() }
-        try seedMail(mail)
-        let sandbox = Sandbox(library: mail.library)
-        defer { sandbox.cleanup() }
+        try seed(mail)
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: mail.library.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mail.library.path) }
 
-        let result = try run(["sync", "--json"], in: sandbox)
-        #expect(result.status == 1)
-        #expect(result.errorCode == "fda_denied")
+        let result = try run(verb + ["--json"], library: mail.library)
+        #expect(result.status == 1 && result.errorCode == "fda_denied", "\(verb): \(result.out)")
         #expect((result.json?["error"] as? [String: Any])?["message"] as? String == Mail42Error.fdaDenied.errorDescription)
-        #expect(!FileManager.default.fileExists(atPath: sandbox.dbURL.path))
     }
 
-    @Test func syncRefusesAnIndexItDoesNotUnderstand() throws {
+    @Test func anIndexMail42DoesNotUnderstandIsRefusedNotGuessedAt() throws {
         guard Self.requireBinary() else { return }
         let mail = try EnvelopeIndexBuilder(schemaOmitting: ["messages.size"])
         defer { mail.cleanup() }
-        try seedMail(mail)
-        let sandbox = Sandbox(library: mail.library)
-        defer { sandbox.cleanup() }
-        let result = try run(["sync", "--json"], in: sandbox)
-        #expect(result.status == 1)
-        #expect(result.errorCode == "schema_unsupported")
+        try seed(mail)
+        let result = try run(["envelope", "list", "--json"], library: mail.library)
+        #expect(result.status == 1 && result.errorCode == "schema_unsupported")
         let message = (result.json?["error"] as? [String: Any])?["message"] as? String
         #expect(message?.contains("size") == true && message?.contains("messages") == true)
-        #expect(!FileManager.default.fileExists(atPath: sandbox.dbURL.path))
     }
 
-    // MARK: - general
-
-    @Test func unknownCommandsExitTwo() throws {
+    @Test func searchingInsideMessagesReadsTheirText() throws {
         guard Self.requireBinary() else { return }
-        let sandbox = Sandbox()
-        defer { sandbox.cleanup() }
-        #expect(try run(["frobnicate"], in: sandbox).status == 2)
-        let help = try run(["help"], in: sandbox)
-        #expect(help.status == 0 && help.out.contains("sync [--full]") && help.out.contains("config set window_days"))
-        #expect(!FileManager.default.fileExists(atPath: sandbox.root.path))   // help and errors create nothing
+        let mail = try EnvelopeIndexBuilder()
+        defer { mail.cleanup() }
+        try seed(mail)
+        func ids(_ query: String) throws -> (ids: [Int], run: Run) {
+            let result = try run(["envelope", "search", query, "--json"], library: mail.library)
+            let rows = (try? JSONSerialization.jsonObject(with: Data(result.out.utf8))) as? [[String: Any]]
+            return (rows?.compactMap { $0["id"] as? Int } ?? [], result)
+        }
+        let body = try ids("body:quokkabody")                  // a word that is only in the message text
+        #expect(body.run.status == 0 && body.ids == [10])
+        #expect(body.run.err.isEmpty)                          // everything was read: nothing to warn about
+        #expect(try ids("quokkabody").ids == [10])
+        #expect(try ids("from:p@example.com").ids == [10])     // searches that need no message text work too
+        #expect(try ids("body:nothingmatchesthis").ids == [])
+    }
+
+    // MARK: - General
+
+    @Test func versionHelpAndUnknownCommands() throws {
+        guard Self.requireBinary() else { return }
+        let library = missingLibrary()
+        #expect(try run(["version"], library: library).out == "mail42 v0.1.0\n")
+        #expect(try run(["--version"], library: library).status == 0)
+
+        let help = try run(["help"], library: library)
+        #expect(help.status == 0)
+        for verb in ["mailbox list", "envelope list", "envelope search", "message read", "message thread",
+                     "attachment list", "attachment save", "open <id>", "permissions"] {
+            #expect(help.out.contains(verb), "help is missing `\(verb)`")
+        }
+        #expect(help.out.contains("keeps no copy"))
+
+        // There is no sync any more, and no settings to change.
+        for gone in ["sync", "config", "frobnicate"] {
+            let result = try run([gone], library: library)
+            #expect(result.status == 2, "`\(gone)` should be an unknown command")
+        }
+        #expect(!help.out.contains("sync") && !help.out.contains("window_days"))
+        #expect(!FileManager.default.fileExists(atPath: library.path))
     }
 }

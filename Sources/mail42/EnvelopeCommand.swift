@@ -1,9 +1,10 @@
 // EnvelopeCommand.swift — `mail42 envelope list` and `mail42 envelope search "<query>"`.
 //
 // An envelope is the cheap summary of a message (sender, subject, date, flags, a snippet), without its body:
-// scan envelopes first, then `message read` only the few that matter. Both verbs read only mail.db.
+// scan envelopes first, then `message read` only the few that matter. Both verbs read Apple Mail's index live.
 
 import Foundation
+import Mail42AppleMail
 import Mail42Kit
 
 enum EnvelopeCommand {
@@ -42,7 +43,7 @@ enum EnvelopeCommand {
             }
         }
         do {
-            show(try MailStore().listEnvelopes(options), json: json)
+            show(try LiveMail.open().listEnvelopes(options), json: json)
         } catch {
             CLI.fail(error: error, json: json)
         }
@@ -58,8 +59,10 @@ enum EnvelopeCommand {
         }
         let limit = CLI.intFlag(args, "--limit", min: 1, json: json) ?? 50
         do {
-            let compiled = try QueryCompiler().compile(query)
-            show(try MailStore().searchEnvelopes(compiled, limit: limit), json: json)
+            let outcome = try LiveMail.open().search(query, limit: limit)
+            show(outcome.records, json: json)
+            // On stderr, so a JSON result stays a plain array: how far back the message text was searched.
+            if let note = outcome.note { CLI.warn("mail42: \(note)") }
         } catch {
             CLI.fail(error: error, json: json)
         }

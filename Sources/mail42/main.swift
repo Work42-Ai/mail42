@@ -1,7 +1,8 @@
 // mail42 — the standalone macOS CLI that reads Apple Mail's local store, read-only, for you and your agents.
 //
 // Manual arg dispatch (no ArgumentParser), like meet42. stdout carries verb output (JSON with `--json`, else
-// human text); all diagnostics go to stderr. mail42 never writes to Apple Mail and never sends mail.
+// human text); all diagnostics go to stderr. mail42 never writes to Apple Mail and never sends mail, and it keeps
+// no copy of the user's mail: every answer is read live from Apple Mail's own data.
 
 import Foundation
 import Mail42AppleMail
@@ -17,7 +18,14 @@ Dispatcher.run(command: command, args: rest)
 
 enum Dispatcher {
 
+    /// The verbs that read Apple Mail's files, so they must run as mail42's own permission principal (the one the
+    /// user grants Full Disk Access to), not as whatever launched them.
+    private static let readVerbs: Set<String> = ["mailbox", "envelope", "message", "attachment", "open"]
+
     static func run(command: String, args: [String]) {
+        if readVerbs.contains(command) {
+            Mail42Daemon.reexecIfNeeded(arguments: [command] + args)
+        }
         switch command {
         case "mailbox":
             MailboxCommand.run(args: args)
@@ -31,10 +39,6 @@ enum Dispatcher {
             OpenCommand.run(args: args)
         case "permissions":
             PermissionsCommand.run(args: args)
-        case "sync":
-            SyncCommand.run(args: args)
-        case "config":
-            ConfigCommand.run(args: args)
         case "version", "--version", "-v":
             print("mail42 v\(mail42Version)")
         case "help", "--help", "-h", "":
@@ -52,18 +56,19 @@ enum Dispatcher {
 
         Usage: mail42 <command> [options]
 
-        Every verb accepts --json. mail42 only reads: it never changes Apple Mail and never sends mail.
-        Errors with --json are {"error":{"code","message"}}. Exit codes: 0 ok, 1 failed or not granted,
-        2 usage / store / not found / bad query.
+        Every verb accepts --json. mail42 only reads, live, from Apple Mail's own data: it keeps no copy of your
+        mail, never changes Apple Mail and never sends mail. Errors with --json are
+        {"error":{"code","message"}}. Exit codes: 0 ok, 1 failed or not granted, 2 usage / not found / bad query.
 
         Mail:
           mailbox list [--json]
-                Accounts and their mailboxes, with total and unread counts.
-          envelope list [-m <mailbox-id|all|flagged>] [--unread] [--flagged] [--limit N] [--before <id>] [--json]
+                Accounts (named as in Mail) and their mailboxes, with total and unread counts.
+          envelope list [-m <mailbox-id|name|all|flagged>] [--unread] [--flagged] [--limit N] [--before <id>] [--json]
                 Message summaries, newest first (default: every inbox, 50 per page).
           envelope search "<query>" [--limit N] [--json]
                 Search with from: to: subject: body: in: is:unread|read|flagged has:attachment
                 date:2w.. date:2026-10-01..2026-10-15, plus and / or / not and plain words.
+                Words and body: read the text of the newest matching messages (it says when that isn't all).
           message read <id> [--text|--html|--headers] [--out <file>] [--json]
                 The full message: plain text by default, sanitised HTML with --html.
           message thread <id> [--json]
@@ -73,13 +78,6 @@ enum Dispatcher {
                 List a message's attachments, or copy one out (default ~/Downloads).
           open <id>
                 Open the message in Mail.app.
-
-        Index:
-          sync [--full] [--json]
-                Copy new, changed and removed mail from Apple Mail into ~/.work42/mail42/mail.db.
-          config get [window_days] [--json]
-          config set window_days <N>
-                How many days of mail to index (default 90, 0 = all).
 
         Access:
           permissions [--json]

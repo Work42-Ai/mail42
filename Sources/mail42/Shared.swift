@@ -40,7 +40,7 @@ enum CLI {
     private struct ErrorBody: Encodable { let code: String; let message: String }
 
     /// Exit code for a failure: 1 when mail42 can't read Apple Mail (no Full Disk Access, no Mail data, an
-    /// index this version doesn't understand), 2 for everything else (store, usage, not found, bad query).
+    /// index this version doesn't understand), 2 for everything else (usage, not found, bad query).
     static func exitCode(for error: Mail42Error) -> Int32 {
         switch error {
         case .fdaDenied, .noMailData, .schemaUnsupported: return 1

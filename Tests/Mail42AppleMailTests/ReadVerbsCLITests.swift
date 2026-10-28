@@ -3,9 +3,9 @@ import Testing
 import Mail42Kit
 import Mail42TestSupport
 
-/// End-to-end tests of the read verbs: the real `mail42` binary, a synthetic Apple Mail store, a synced mail.db.
-/// Every run is sandboxed (`MAIL42_ROOT`, `MAIL42_MAIL_LIBRARY`) and forced into `MAIL42_OPEN_DRY_RUN`, so nothing
-/// here can touch the user's mail or open Mail.app.
+/// End-to-end tests of the read verbs: the real `mail42` binary reading a synthetic Apple Mail store live.
+/// Every run is sandboxed (`MAIL42_MAIL_LIBRARY`, `MAIL42_ACCOUNTS_DB`) and forced into `MAIL42_OPEN_DRY_RUN`, so
+/// nothing here can touch the user's mail or open Mail.app.
 @Suite struct ReadVerbsCLITests {
 
     struct Run {
@@ -30,27 +30,30 @@ import Mail42TestSupport
         return false
     }
 
-    /// A synced mailbox with seven messages:
+    /// A mailbox with seven messages:
     ///   10 plain text, unread, conversation 5         11 hostile HTML + inline image, read, conversation 5
     ///   12 attachment (report.pdf), flagged            13 no file on disk (metadata only), Apple summary
     ///   14 partial file, attachment bytes not cached   15 partial file with no body at all
     ///   16 plain text in Sent, read
     final class Fixture {
         let mail: EnvelopeIndexBuilder
-        let root: URL
+        let accountsDB: URL
         let attachmentsDir: URL
         private let folder: URL
 
         init() throws {
             mail = try EnvelopeIndexBuilder()
             folder = FileManager.default.temporaryDirectory.appendingPathComponent("mail42-read-cli-\(UUID().uuidString)", isDirectory: true)
-            root = folder.appendingPathComponent("root", isDirectory: true)
             attachmentsDir = folder.appendingPathComponent("saved", isDirectory: true)
 
             let now = Int64(Date().timeIntervalSince1970)
             try mail.addMailbox(id: 1, url: EnvelopeIndexBuilder.mailboxURL(["INBOX"]), total: 6, unread: 5)
             try mail.addMailbox(id: 2, url: EnvelopeIndexBuilder.mailboxURL(["Sent Messages"]), total: 1, unread: 0)
-            try mail.writeAccountsMap(email: "yan@example.com")
+            accountsDB = try mail.writeAccountsDatabase([
+                .init(pk: 1, identifier: EnvelopeIndexBuilder.accountUUID, username: "yan@example.com",
+                      description: "yan@example.com")])
+            try mail.addAttachment(messageRowid: 12, attachmentID: "2", name: "report.pdf")
+            try mail.addAttachment(messageRowid: 14, attachmentID: "2", name: "report.pdf")
             func add(_ id: Int64, _ subject: String, _ from: String, _ name: String, age: Int64, mailbox: Int64 = 1,
                      read: Bool = false, flagged: Bool = false, conversation: Int64 = 0, header: String?, summary: String? = nil) throws {
                 try mail.addMessage(.init(rowid: id, subject: subject, senderAddress: from, senderName: name, mailboxID: mailbox,
@@ -88,8 +91,8 @@ import Mail42TestSupport
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: "MAIL42_NO_REEXEC")
         env.removeValue(forKey: "MAIL42_REEXEC")
-        env[Mail42Paths.Override.root] = f.root.path
         env[Mail42Paths.Override.mailLibrary] = f.mail.library.path
+        env[Mail42Paths.Override.accountsDatabase] = f.accountsDB.path
         env["MAIL42_OPEN_DRY_RUN"] = "1"                       // never launch Mail.app from a test
         process.environment = env
         let out = Pipe(), err = Pipe()
@@ -108,13 +111,10 @@ import Mail42TestSupport
                    err: String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
     }
 
-    /// A synced fixture, or `nil` when the binary isn't built.
+    /// The fixture, or `nil` when the binary isn't built. (Nothing to sync: the verbs read the store live.)
     private func synced() throws -> Fixture? {
         guard Self.requireBinary() else { return nil }
-        let f = try Fixture()
-        let result = try run(["sync", "--json"], f)
-        #expect(result.status == 0 && result.object?["added"] as? Int == 7)
-        return f
+        return try Fixture()
     }
 
     // MARK: - mailbox list
@@ -136,14 +136,12 @@ import Mail42TestSupport
         #expect(try run(["mailbox", "frobnicate", "--json"], f).errorCode == "usage")
     }
 
-    @Test func mailboxListBeforeAnySyncIsEmptyNotAnError() throws {
-        guard Self.requireBinary() else { return }
-        let f = try Fixture()
+    @Test func anAccountIsNamedAsMailNamesIt() throws {
+        guard let f = try synced() else { return }
         defer { f.cleanup() }
-        let result = try run(["mailbox", "list", "--json"], f)
-        #expect(result.status == 0 && result.array?.isEmpty == true)
-        #expect(try run(["mailbox", "list"], f).out.contains("mail42 sync"))
-        #expect(try run(["envelope", "list", "--json"], f).array?.isEmpty == true)
+        let account = try #require(try run(["mailbox", "list", "--json"], f).array?.first?["account"] as? [String: Any])
+        #expect(account["name"] as? String == "yan@example.com" && account["email"] as? String == "yan@example.com")
+        #expect(account["id"] as? String == EnvelopeIndexBuilder.accountUUID)
     }
 
     // MARK: - envelope list
@@ -166,7 +164,7 @@ import Mail42TestSupport
         #expect(((first["to"] as? [[String: Any]])?.first)?["addr"] as? String == "yan@example.com")
         #expect((first["mailbox"] as? [String: Any])?["role"] as? String == "inbox")
         #expect((first["account"] as? [String: Any])?["email"] as? String == "yan@example.com")
-        #expect((first["snippet"] as? String)?.contains("quokkabody") == true)
+        #expect(first["snippet"] is NSNull)                                       // only Apple's own summary is a snippet
         let date = try #require(first["date"] as? String)
         #expect(date.range(of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"#, options: .regularExpression) != nil)
 
@@ -240,7 +238,7 @@ import Mail42TestSupport
 
     // MARK: - envelope search
 
-    @Test func searchFindsByTextFieldsAndState() throws {
+    @Test func searchFindsByHeaderFieldsAndState() throws {
         guard let f = try synced() else { return }
         defer { f.cleanup() }
         #expect(try run(["envelope", "search", "quokkabody", "--json"], f).ids == [10])           // body only
@@ -407,8 +405,8 @@ import Mail42TestSupport
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.mail.library.path) }
         let result = try run(["message", "read", "10", "--json"], f)
         #expect(result.status == 1 && result.errorCode == "fda_denied")
-        // Reads that don't need the file still work.
-        #expect(try run(["envelope", "list", "--json"], f).status == 0)
+        // Nothing can be read without it: the index is behind the same permission.
+        #expect(try run(["envelope", "list", "--json"], f).errorCode == "fda_denied")
         #expect(try run(["attachment", "save", "12", "2", "--to", f.attachmentsDir.path, "--json"], f).errorCode == "fda_denied")
     }
 

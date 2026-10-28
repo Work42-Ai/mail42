@@ -1,7 +1,8 @@
 // MailboxCommand.swift — `mail42 mailbox list [--json]`: every account and its mailboxes, with counts.
-// Reads only mail.db (no Apple Mail access, no permission needed).
+// The counts are Apple Mail's own, read live.
 
 import Foundation
+import Mail42AppleMail
 import Mail42Kit
 
 enum MailboxCommand {
@@ -12,7 +13,7 @@ enum MailboxCommand {
             CLI.usageError("usage: mailbox list [--json]", json: json)
         }
         do {
-            let tree = try MailStore().accountsWithMailboxes()
+            let tree = try LiveMail.open().accountsWithMailboxes()
             if json {
                 CLI.emitJSONObject(tree.map { entry in
                     [
@@ -28,7 +29,7 @@ enum MailboxCommand {
                 return
             }
             if tree.isEmpty {
-                print("No mailboxes yet. Run `mail42 sync` first.")
+                print("Apple Mail has no mailboxes yet. Add an account in Mail.")
                 return
             }
             for entry in tree {

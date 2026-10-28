@@ -145,6 +145,24 @@ import Mail42TestSupport
         #expect(try mail.listEnvelopes(.init(mailbox: .flagged, unreadOnly: true)).map(\.row.id) == [100, 102])
     }
 
+    @Test func aGmailMessageListedUnderInboxIsFoundWhereItIsStored() throws {
+        let b = try EnvelopeIndexBuilder(); defer { b.cleanup() }
+        // Message 100 is stored in All Mail (12) and labelled Inbox (1): its file is under All Mail, not INBOX.
+        try b.addMailbox(id: 1, url: EnvelopeIndexBuilder.mailboxURL(["INBOX"]))
+        try b.addMailbox(id: 12, url: EnvelopeIndexBuilder.mailboxURL(["[Gmail]", "All Mail"]))
+        try b.addMessage(.init(rowid: 100, subject: "labelled", senderAddress: "a@b.com", mailboxID: 12, dateReceived: Self.now))
+        try b.addLabel(messageRowid: 100, mailboxID: 1)
+        let file = try b.writeEmlx(rowid: 100, mailboxPath: ["[Gmail]", "All Mail"], data: MailFixtures.emlx(MailFixtures.plain()))
+        let mail = try live(b)
+
+        let listed = try #require(try mail.listEnvelopes(.init(mailbox: .id(1))).first)
+        #expect(listed.row.id == 100 && listed.mailboxName == "INBOX")             // shown under Inbox…
+        #expect(mail.emlxURL(for: listed)?.path == file.path)                      // …read from where it is stored
+        let direct = try #require(try mail.envelopeRecord(id: 100))
+        #expect(mail.emlxURL(for: direct)?.path == file.path)
+        #expect(try mail.attachments(of: listed).isEmpty)
+    }
+
     // MARK: - Paging
 
     @Test func pagesDoNotOverlapAndEndCleanly() throws {

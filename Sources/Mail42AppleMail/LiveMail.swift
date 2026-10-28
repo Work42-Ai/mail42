@@ -113,9 +113,13 @@ public final class LiveMail {
 
     /// Ids of the mailboxes a name, id or role refers to (`INBOX`, `Jarvis/VIP`, `VIP`, `inbox`, `12`).
     public func mailboxIDs(matching value: String) -> [Int64] {
+        Self.mailboxIDs(matching: value, in: mailboxRows)
+    }
+
+    private static func mailboxIDs(matching value: String, in rows: [MailboxRow]) -> [Int64] {
         let wanted = value.lowercased()
         let numeric = Int64(value)
-        return mailboxRows.filter { mailbox in
+        return rows.filter { mailbox in
             let name = mailbox.name.lowercased()
             return mailbox.id == numeric || name == wanted || name.hasSuffix("/" + wanted) || mailbox.role == wanted
         }.map(\.id)
@@ -168,6 +172,128 @@ public final class LiveMail {
             newestFirstLimit: max(options.limit, 0))
     }
 
+    /// A search's results, and a note when it could not cover every message.
+    public struct SearchOutcome: Sendable {
+        public var records: [EnvelopeRecord]
+        /// Set when the text of some messages was not read ("searched the newest 3,000…"); say so, never hide it.
+        public var note: String?
+    }
+
+    private static let searchJoins = "LEFT JOIN subjects s ON s.ROWID = m.subject LEFT JOIN addresses a ON a.ROWID = m.sender"
+
+    /// Messages matching a search query (`from:alice is:unread date:2w.. invoice`), newest first.
+    ///
+    /// Everything but message text is answered from Apple's index. Words and `body:` need the text, which Apple's
+    /// index doesn't hold: those read the newest messages that match the rest of the query (within `scan`'s limits)
+    /// and the outcome's `note` says so when that wasn't all of them.
+    public func search(_ query: String, limit: Int, scan: ScanLimits = .standard) throws -> SearchOutcome {
+        let rows = mailboxRows
+        func compiler(_ matches: [String: Set<Int64>]?) -> QueryCompiler {
+            QueryCompiler(mailboxIDs: { Self.mailboxIDs(matching: $0, in: rows) }, textMatches: matches)
+        }
+        let order = "ORDER BY m.date_received DESC, m.ROWID DESC LIMIT \(max(limit, 0))"
+
+        let relaxed = try compiler(nil).compile(query)
+        guard !relaxed.textTerms.isEmpty else {
+            let records = try fetchRecords(
+                mailboxes: nil, clauses: ["m.deleted = 0", relaxed.whereSQL], params: relaxed.params,
+                order: order, joins: Self.searchJoins)
+            return SearchOutcome(records: records, note: nil)
+        }
+
+        // 1. The newest messages that pass everything that doesn't need their text.
+        let found = try orderedIDs(
+            mailboxes: nil, clauses: ["m.deleted = 0", relaxed.whereSQL], params: relaxed.params,
+            order: "ORDER BY m.date_received DESC, m.ROWID DESC LIMIT \(scan.maxMessages + 1)",
+            newestFirstLimit: nil, joins: Self.searchJoins)
+        let moreExist = found.count > scan.maxMessages
+        let candidates = Array(found.prefix(scan.maxMessages))
+
+        // 2. Read them newest first, a chunk at a time, and after each chunk ask the real question over everything read
+        //    so far. Whether a message qualifies depends only on that message, so once there are `limit` results the
+        //    older, unread candidates cannot displace them: stop there instead of reading the rest.
+        func results(_ matches: [String: Set<Int64>], _ scanned: Set<Int64>) throws -> [EnvelopeRecord] {
+            guard !scanned.isEmpty else { return [] }
+            let final = try compiler(matches).compile(query)
+            let read = scanned.map(String.init).joined(separator: ",")
+            return try fetchRecords(
+                mailboxes: nil, clauses: ["m.deleted = 0", "m.ROWID IN (\(read))", final.whereSQL], params: final.params,
+                order: order, joins: Self.searchJoins)
+        }
+
+        let deadline = Date().addingTimeInterval(scan.timeLimit)
+        var matches: [String: Set<Int64>] = [:]
+        var scanned = Set<Int64>()
+        var records: [EnvelopeRecord] = []
+        var satisfied = false, outOfTime = false
+        var start = 0
+        while start < candidates.count, limit > 0 {
+            let chunk = Array(candidates[start..<min(start + Self.scanChunk, candidates.count)])
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining <= 0 { outOfTime = true; break }
+            let read = BodyScanner.scan(
+                terms: relaxed.textTerms, candidates: try emlxFiles(for: chunk),
+                limits: ScanLimits(maxMessages: chunk.count, timeLimit: remaining))
+            scanned.formUnion(read.scanned)
+            for (term, ids) in read.matches { matches[term, default: []].formUnion(ids) }
+            start += chunk.count
+            if read.scanned.count < chunk.count { outOfTime = true; break }
+            records = try results(matches, scanned)
+            if records.count >= limit { satisfied = true; break }
+        }
+        if !satisfied { records = try results(matches, scanned) }
+
+        // 3. Say so when the answer might be missing older messages.
+        var note: String?
+        if satisfied {
+            note = nil
+        } else if outOfTime {
+            note = "Stopped after \(Int(scan.timeLimit)) s: read the text of the newest \(scanned.count.formatted()) "
+                + "of \(candidates.count.formatted()) messages that match the rest of your query. "
+                + "Add from:, in: or date: to narrow it."
+        } else if moreExist {
+            note = "Read the text of the newest \(candidates.count.formatted()) messages that match the rest of your "
+                + "query; older ones weren't searched. Add from:, in: or date: to reach further back."
+        }
+        return SearchOutcome(records: records, note: note)
+    }
+
+    /// How many messages a text search reads before checking whether it already has enough results.
+    private static let scanChunk = 500
+
+    /// Where Mail keeps each message's file (nil when it has none), in the order of `ids`.
+    private func emlxFiles(for ids: [Int64]) throws -> [(id: Int64, file: URL?)] {
+        var mailboxOf: [Int64: Int64] = [:]
+        for start in stride(from: 0, to: ids.count, by: 500) {
+            let chunk = Array(ids[start..<min(start + 500, ids.count)])
+            let marks = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            try snapshot.connection.query(
+                "SELECT ROWID, mailbox FROM messages WHERE ROWID IN (\(marks))", chunk.map(SQLiteValue.int)
+            ) { mailboxOf[$0.int(0)] = $0.int(1) }
+        }
+        return ids.map { id in
+            (id, mailboxOf[id].flatMap { mailboxByID[$0] }.flatMap {
+                EmlxLocator.emlxURL(rowid: id, mailboxURL: $0.url, mailRoot: mailRoot)
+            })
+        }
+    }
+
+    /// A message's attachments: from its file when Mail has it (names, types and sizes), else the names in Apple's
+    /// index (no type or size).
+    public func attachments(of record: EnvelopeRecord) throws -> [AttachmentRow] {
+        if let file = emlxURL(for: record), let parsed = try? MessageParser.parse(emlx: file) {
+            return parsed.attachments.map {
+                AttachmentRow(part: $0.part, filename: $0.filename ?? "", mime: $0.mime, size: Int64($0.size))
+            }
+        }
+        var rows: [AttachmentRow] = []
+        try snapshot.connection.query(
+            "SELECT attachment_id, name FROM attachments WHERE message = ? AND name IS NOT NULL AND name != '' ORDER BY attachment_id",
+            [.int(record.row.id)]
+        ) { rows.append(AttachmentRow(part: $0.text(0) ?? "", filename: $0.text(1) ?? "", mime: "", size: 0)) }
+        return rows
+    }
+
     public func envelopeRecord(id: Int64) throws -> EnvelopeRecord? {
         try fetchRecords(mailboxes: nil, clauses: ["m.deleted = 0", "m.ROWID = ?"], params: [.int(id)], order: "").first
     }
@@ -185,7 +311,11 @@ public final class LiveMail {
 
     /// The path of a message's .emlx, if Mail has its file on disk.
     public func emlxURL(for record: EnvelopeRecord) -> URL? {
-        guard let mailbox = mailboxByID[record.row.mailboxID] else { return nil }
+        // A record carries the mailbox it is listed under (a Gmail Inbox label), but the file is in the mailbox the
+        // message is stored in (All Mail), so ask the index where that is.
+        let stored = ((try? snapshot.connection.scalarInt(
+            "SELECT mailbox FROM messages WHERE ROWID = ?", [.int(record.row.id)])) ?? nil) ?? record.row.mailboxID
+        guard let mailbox = mailboxByID[stored] else { return nil }
         return EmlxLocator.emlxURL(rowid: record.row.id, mailboxURL: mailbox.url, mailRoot: mailRoot)
     }
 
@@ -194,11 +324,13 @@ public final class LiveMail {
     /// - Parameter mailboxes: restrict to messages stored in or labelled with these mailboxes; nil = any message.
     /// - Parameter newestFirstLimit: set by `listEnvelopes`; it lets a flagged-only list sort its few rows itself.
     private func fetchRecords(
-        mailboxes: [Int64]?, clauses: [String], params: [SQLiteValue], order: String, newestFirstLimit: Int? = nil
+        mailboxes: [Int64]?, clauses: [String], params: [SQLiteValue], order: String, newestFirstLimit: Int? = nil,
+        joins: String = ""
     ) throws -> [EnvelopeRecord] {
         // Step 1: just the ids, in order.
         let ids = try orderedIDs(
-            mailboxes: mailboxes, clauses: clauses, params: params, order: order, newestFirstLimit: newestFirstLimit)
+            mailboxes: mailboxes, clauses: clauses, params: params, order: order, newestFirstLimit: newestFirstLimit,
+            joins: joins)
         guard !ids.isEmpty else { return [] }
 
         // Step 2: the details of those ids only.
@@ -248,7 +380,8 @@ public final class LiveMail {
 
     /// The ids, in `order`, of the messages matching `clauses` that belong to `mailboxes`.
     private func orderedIDs(
-        mailboxes: [Int64]?, clauses: [String], params: [SQLiteValue], order: String, newestFirstLimit: Int?
+        mailboxes: [Int64]?, clauses: [String], params: [SQLiteValue], order: String, newestFirstLimit: Int?,
+        joins: String
     ) throws -> [Int64] {
         let whereSQL = clauses.joined(separator: " AND ")
         let sql: String
@@ -294,7 +427,7 @@ public final class LiveMail {
                 sql = "SELECT m.ROWID FROM messages m WHERE \(whereSQL) AND \(member) \(order)"
             }
         } else {
-            sql = "SELECT m.ROWID FROM messages m WHERE \(whereSQL) \(order)"
+            sql = "SELECT m.ROWID FROM messages m \(joins) WHERE \(whereSQL) \(order)"
         }
         var ids: [Int64] = []
         try snapshot.connection.query(sql, params) { ids.append($0.int(0)) }

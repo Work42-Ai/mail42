@@ -1,7 +1,7 @@
 // MessageCommand.swift — `mail42 message read <id>` and `mail42 message thread <id>`.
 //
-// `read` opens the message's .emlx file under ~/Library/Mail, so it re-launches itself as mail42's own
-// permission principal first (Full Disk Access). Text is the default; `--html` gives the sender's HTML,
+// `read` opens the message's .emlx file under ~/Library/Mail (the dispatcher already re-launched mail42 as its own
+// permission principal, which holds Full Disk Access). Text is the default; `--html` gives the sender's HTML,
 // sanitised (no scripts, no event handlers, cid: images inlined); `--headers` gives only the headers.
 
 import Foundation
@@ -15,8 +15,6 @@ enum MessageCommand {
         let words = CLI.positionals(args, valueFlags: ["--out"])
         switch words.first {
         case "read":
-            // Before anything else: reading the file needs mail42's own Full Disk Access identity.
-            Mail42Daemon.reexecIfNeeded(arguments: ["message"] + args)
             read(args: args, words: words, json: json)
         case "thread":
             thread(words: words, json: json)
@@ -30,7 +28,7 @@ enum MessageCommand {
     private static func thread(words: [String], json: Bool) {
         let id = CLI.messageID(words.dropFirst().first, json: json)
         do {
-            EnvelopeCommand.show(try MailStore().thread(containing: id), json: json)
+            EnvelopeCommand.show(try LiveMail.open().thread(containing: id), json: json)
         } catch {
             CLI.fail(error: error, json: json)
         }
@@ -51,10 +49,13 @@ enum MessageCommand {
         let mode = requested.first ?? .text
 
         do {
-            let store = try MailStore()
-            guard let record = try store.envelopeRecord(id: id) else { throw Mail42Error.notFound("message \(id)") }
-            let attachments = try store.attachments(of: id)
-            let body = try loadBody(record)
+            let mail = try LiveMail.open()
+            guard let record = try mail.envelopeRecord(id: id) else { throw Mail42Error.notFound("message \(id)") }
+            let body = try loadBody(mail.emlxURL(for: record))
+            // From the message file when it was read (names, types, sizes), else the names Apple's index holds.
+            let attachments = try body.parsed.map { parsed in
+                parsed.attachments.map { AttachmentRow(part: $0.part, filename: $0.filename ?? "", mime: $0.mime, size: Int64($0.size)) }
+            } ?? mail.attachments(of: record)
 
             let content: String?
             switch (mode, body.parsed) {
@@ -88,10 +89,10 @@ enum MessageCommand {
 
     /// The message parsed from its file, or `nil` + `unavailable` when there is no body to show: no file
     /// (Exchange, never downloaded), an unreadable one, or a partial file whose body Mail never fetched.
-    private static func loadBody(_ record: EnvelopeRecord) throws -> (parsed: ParsedMessage?, unavailable: Bool) {
-        guard let path = record.row.emlxPath else { return (nil, true) }
+    private static func loadBody(_ file: URL?) throws -> (parsed: ParsedMessage?, unavailable: Bool) {
+        guard let file else { return (nil, true) }
         do {
-            let parsed = try MessageParser.parse(emlx: URL(fileURLWithPath: path))
+            let parsed = try MessageParser.parse(emlx: file)
             let hasBody = !(parsed.textBody ?? "").isEmpty || !(parsed.htmlBody ?? "").isEmpty
             return (parsed, parsed.isPartial && !hasBody)
         } catch Mail42Error.fdaDenied {

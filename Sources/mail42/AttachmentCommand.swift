@@ -1,7 +1,7 @@
 // AttachmentCommand.swift — `mail42 attachment list <id>` and `mail42 attachment save <id> <part> [--to <dir>]`.
 //
-// `list` reads mail.db. `save` reads the message's .emlx (so it re-launches as mail42's own permission principal)
-// and copies one attachment into a folder (default ~/Downloads) without overwriting anything.
+// `list` reads the message's file (or, if Mail has none, the names in Apple's index). `save` copies one attachment
+// out of the message's .emlx into a folder (default ~/Downloads) without overwriting anything.
 
 import Foundation
 import Mail42AppleMail
@@ -16,7 +16,6 @@ enum AttachmentCommand {
         case "list":
             list(words: words, json: json)
         case "save":
-            Mail42Daemon.reexecIfNeeded(arguments: ["attachment"] + args)
             save(args: args, words: words, json: json)
         default:
             CLI.usageError("usage: attachment list <id> | attachment save <id> <part> [--to <dir>]", json: json)
@@ -26,9 +25,9 @@ enum AttachmentCommand {
     private static func list(words: [String], json: Bool) {
         let id = CLI.messageID(words.dropFirst().first, json: json)
         do {
-            let store = try MailStore()
-            guard try store.envelopeRecord(id: id) != nil else { throw Mail42Error.notFound("message \(id)") }
-            let attachments = try store.attachments(of: id)
+            let mail = try LiveMail.open()
+            guard let record = try mail.envelopeRecord(id: id) else { throw Mail42Error.notFound("message \(id)") }
+            let attachments = try mail.attachments(of: record)
             if json {
                 CLI.emitJSONObject(attachments.map(Presentation.attachment))
             } else if attachments.isEmpty {
@@ -53,14 +52,14 @@ enum AttachmentCommand {
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
 
         do {
-            let store = try MailStore()
-            guard let record = try store.envelopeRecord(id: id) else { throw Mail42Error.notFound("message \(id)") }
-            guard let path = record.row.emlxPath else {
+            let mail = try LiveMail.open()
+            guard let record = try mail.envelopeRecord(id: id) else { throw Mail42Error.notFound("message \(id)") }
+            guard let file = mail.emlxURL(for: record) else {
                 throw Mail42Error.emlxNotFound(messageId: Int(id), path: "(this message has no file on disk)")
             }
             let parsed: ParsedMessage
             do {
-                parsed = try MessageParser.parse(emlx: URL(fileURLWithPath: path))
+                parsed = try MessageParser.parse(emlx: file)
             } catch Mail42Error.emlxNotFound where AppleMailAccess.fullDiskAccess() == .denied {
                 throw Mail42Error.fdaDenied
             }
