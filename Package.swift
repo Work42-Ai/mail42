@@ -35,14 +35,21 @@ let package = Package(
             dependencies: ["Mail42Kit", "Mail42AppleMail"],
             path: "Sources/mail42"
         ),
+        // Test-only helpers shared by both test targets: a builder for synthetic Envelope Index databases and
+        // .emlx fixtures. Not a product; nothing outside the tests depends on it.
+        .target(
+            name: "Mail42TestSupport",
+            dependencies: ["Mail42Kit"],
+            path: "Tests/Mail42TestSupport"
+        ),
         .testTarget(
             name: "Mail42KitTests",
-            dependencies: ["Mail42Kit"],
+            dependencies: ["Mail42Kit", "Mail42TestSupport"],
             path: "Tests/Mail42KitTests"
         ),
         .testTarget(
             name: "Mail42AppleMailTests",
-            dependencies: ["Mail42AppleMail", "Mail42Kit"],
+            dependencies: ["Mail42AppleMail", "Mail42Kit", "Mail42TestSupport"],
             path: "Tests/Mail42AppleMailTests"
         ),
     ]

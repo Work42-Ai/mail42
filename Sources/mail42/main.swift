@@ -4,10 +4,12 @@
 // human text); all diagnostics go to stderr. mail42 never writes to Apple Mail and never sends mail.
 
 import Foundation
+import Mail42AppleMail
 
 let mail42Version = "0.1.0"
 
-let argv = CommandLine.arguments
+// `--reexec` is the internal marker of the permission-identity re-launch (Mail42Daemon); verbs never see it.
+let argv = Mail42Daemon.strippingReexec(CommandLine.arguments)
 let command = argv.count > 1 ? argv[1] : "help"
 let rest = Array(argv.dropFirst(2))
 
@@ -17,11 +19,13 @@ enum Dispatcher {
 
     /// Verbs that exist in the CLI surface but are implemented by later sub-issues of WOR-438.
     private static let notImplementedYet: Set<String> = [
-        "mailbox", "envelope", "message", "attachment", "open", "sync", "permissions", "config",
+        "mailbox", "envelope", "message", "attachment", "open", "sync", "config",
     ]
 
     static func run(command: String, args: [String]) {
         switch command {
+        case "permissions":
+            PermissionsCommand.run(args: args)
         case "version", "--version", "-v":
             print("mail42 v\(mail42Version)")
         case "help", "--help", "-h", "":

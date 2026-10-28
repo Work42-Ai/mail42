@@ -6,8 +6,11 @@ notice and permission notice be kept with copies of the code.
 ## che-apple-mail-mcp
 
 - Source: https://github.com/PsychQuant/che-apple-mail-mcp
-- Used in: `Sources/Mail42AppleMail/Vendor/` (the Envelope Index reader, `.emlx` / MIME parsers and the Full
-  Disk Access check, adapted for mail42). Each adapted file names its upstream path and commit in its header.
+- Used in: `Sources/Mail42AppleMail/Vendor/` (the `.emlx` container and RFC 822 / MIME parsers, mailbox URL
+  decoding, account mapping and the Full Disk Access probe, adapted for mail42). Each file names its upstream
+  path and commit in its header. `Sources/Mail42AppleMail/EmlxLocator.swift` re-implements upstream's
+  hash-directory rule for locating `.emlx` files. Upstream's `EnvelopeIndexReader` is not used: mail42 reads a
+  private snapshot copy of the index with its own code.
 - License: MIT
 
 ```

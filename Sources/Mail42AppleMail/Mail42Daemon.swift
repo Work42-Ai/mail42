@@ -7,9 +7,14 @@
 // re-exec in place with the "disclaim responsibility" spawn attribute, so mail42 is its own principal: the
 // grant the user gives to mail42.app in System Settings is the one that applies, whoever launched it.
 //
-//   1. First call (no `--reexec`): `setsid()` to leave the parent's session, then re-exec this binary in place
-//      (`POSIX_SPAWN_SETEXEC`, same pid) with `--reexec` appended and responsibility disclaimed.
-//   2. Second call (`--reexec` present): `reexecIfNeeded` returns at once and the verb runs.
+//   1. First call (no `--reexec` in the process's own argv): `setsid()` to leave the parent's session, then
+//      re-exec this binary in place (`POSIX_SPAWN_SETEXEC`, same pid) with `--reexec` appended, the
+//      `MAIL42_REEXEC=1` marker set, and responsibility disclaimed.
+//   2. Second call (in the re-exec'd process): `reexecIfNeeded` returns at once and the verb runs.
+//
+// The phase is read from `CommandLine.arguments` and the environment, NOT from the verb arguments passed to
+// `reexecIfNeeded`: `main.swift` strips `--reexec` before dispatching, so checking the passed list would never
+// see it and would re-exec forever (this happened once; `shouldReexec` and its tests pin the rule).
 //
 // Switches: MAIL42_NO_DISCLAIM=1 falls back to a plain execve; MAIL42_NO_REEXEC=1 skips the re-exec entirely
 // (used by tests, which cannot be re-executed).
@@ -35,21 +40,31 @@ public enum Mail42Daemon {
         args.contains("--reexec")
     }
 
-    /// Re-exec this process as mail42's own permission principal. `arguments` is the argv after the program
-    /// name (the verb and its flags). On the first call this does not return (it execs); on the re-exec call
-    /// (`--reexec` present) it returns immediately so the caller runs its verb.
+    /// Whether this process should re-exec itself now. Pure, so it is testable.
     ///
-    /// Call it first thing in any verb that reads `~/Library/Mail`. `--reexec` is stripped by the caller's
-    /// argument handling via `strippingReexec(_:)`.
-    public static func reexecIfNeeded(arguments: [String]) {
-        let isReexec = isReexec(arguments)
-        if !isReexec {
-            // Leave the parent's session so a long verb outlives the spawning shell, then re-exec in place.
-            _ = setsid()
-        }
-        let env = ProcessInfo.processInfo.environment
-        if isReexec || env["MAIL42_NO_REEXEC"] == "1" { return }
+    /// The phase is a property of the **process's own** argv and environment, never of the verb arguments a
+    /// caller passes in: `main.swift` strips `--reexec` before dispatching a verb, so a verb that asked
+    /// "is `--reexec` in my arguments?" would never see it and would re-exec forever. The `MAIL42_REEXEC`
+    /// environment marker, set on the re-exec, is a second guard against that class of loop.
+    public static func shouldReexec(processArguments: [String], environment: [String: String]) -> Bool {
+        !isReexec(processArguments)
+            && environment["MAIL42_REEXEC"] != "1"
+            && environment["MAIL42_NO_REEXEC"] != "1"
+    }
 
+    /// Re-exec this process as mail42's own permission principal. `arguments` is the argv after the program
+    /// name (the verb and its flags, without `--reexec`). On the first call this does not return (it execs); in
+    /// the re-exec'd process it returns immediately so the caller runs its verb.
+    ///
+    /// Call it first thing in any verb that reads `~/Library/Mail`.
+    public static func reexecIfNeeded(arguments: [String]) {
+        var env = ProcessInfo.processInfo.environment
+        guard shouldReexec(processArguments: CommandLine.arguments, environment: env) else { return }
+
+        // Leave the parent's session so a long verb outlives the spawning shell, then re-exec in place.
+        _ = setsid()
+
+        env["MAIL42_REEXEC"] = "1"
         let exePath = currentExecutablePath()
         let cArgs = ([exePath] + arguments + ["--reexec"]).map { strdup($0) }
         defer { cArgs.forEach { free($0) } }
