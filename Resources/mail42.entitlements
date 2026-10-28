@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  mail42.entitlements — signed into the release binary (scripts/build-mail42.sh, scripts/release.sh).
+
+  Intentionally empty. The release is built with the Hardened Runtime (notarization requires it), and Full Disk
+  Access, the only privilege mail42 needs, is a user grant in System Settings, not an entitlement. mail42 sends
+  no Apple Events and uses no sandbox.
+-->
+<plist version="1.0">
+<dict/>
+</plist>
