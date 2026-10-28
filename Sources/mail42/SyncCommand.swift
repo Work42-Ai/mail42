@@ -17,7 +17,7 @@ enum SyncCommand {
 
         let json = CLI.wantsJSON(args)
         do {
-            let result = try MailSync().run(full: args.contains("--full"))
+            let result = try MailSync(statusFile: Mail42Paths.syncStatus).run(full: args.contains("--full"))
             if json {
                 CLI.emitJSON(result)
             } else {

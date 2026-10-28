@@ -35,6 +35,9 @@ public enum Mail42Paths {
     /// `~/.work42/mail42/trace.jsonl` — one JSON line per sync outcome and notable event.
     public static var trace: URL { root.appendingPathComponent("trace.jsonl") }
 
+    /// `~/.work42/mail42/sync-status.json` — live progress of a running `mail42 sync` (see `SyncStatus`).
+    public static var syncStatus: URL { root.appendingPathComponent("sync-status.json") }
+
     /// Creates `~/.work42/mail42` if needed.
     @discardableResult
     public static func ensureRoot() throws -> URL {

@@ -35,6 +35,9 @@ moves or changes mail.
 
 ## Notes for agents
 
-- The reader files live under the session's `artifacts/mail42-reader/` folder (the artifact server serves them to
-  the web view); they are disposable and only the latest few are kept.
+- The reader files live under `~/.work42/mail42/reader/artifacts/mail42-reader/` (registered with the artifact
+  server under mail42's own id, so the widget works in a session tab and on the session-less workspace home); they
+  are disposable and only the latest few are kept.
+- While a sync runs, the CLI keeps `~/.work42/mail42/sync-status.json` up to date and the tile shows "Loading your
+  mail… N of M messages" instead of an empty state.
 - Message ids in comments and in the CLI are mail42's own (`envelope list` shows them), not Mail.app's.

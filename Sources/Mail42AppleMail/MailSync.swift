@@ -53,6 +53,7 @@ public final class MailSync {
     private let storeURL: URL
     private let library: URL
     private let traceFile: URL?
+    private let statusFile: URL?
     private let now: () -> Date
 
     private static let batchSize = 500
@@ -62,15 +63,19 @@ public final class MailSync {
     ///   - storeURL: where mail.db lives (tests use a temp file).
     ///   - library: the `Library/Mail` folder to read (tests use a synthetic one).
     ///   - traceFile: where to append the `sync-ok` / `sync-failed` line; nil to skip tracing.
+    ///   - statusFile: where to publish live progress (`SyncStatus`); nil to skip. The CLI passes
+    ///     `Mail42Paths.syncStatus`; it has no default so tests never touch the real one.
     public init(
         storeURL: URL = Mail42Paths.db,
         library: URL = Mail42Paths.appleMailLibrary,
         traceFile: URL? = Mail42Paths.trace,
+        statusFile: URL? = nil,
         now: @escaping () -> Date = Date.init
     ) {
         self.storeURL = storeURL
         self.library = library
         self.traceFile = traceFile
+        self.statusFile = statusFile
         self.now = now
     }
 
@@ -78,6 +83,8 @@ public final class MailSync {
 
     public func run(full: Bool = false) throws -> SyncResult {
         let started = Date()
+        // However this run ends, the status file must stop saying "running".
+        defer { statusFile.map { SyncStatus.idle(finished: now()).write(to: $0) } }
         do {
             let result = try sync(full: full, started: started)
             trace("sync-ok", ["added": result.added, "updated": result.updated, "removed": result.removed, "ms": result.ms])
@@ -94,6 +101,18 @@ public final class MailSync {
     }
 
     private func milliseconds(since start: Date) -> Int { Int(Date().timeIntervalSince(start) * 1000) }
+
+    /// Publishes live progress for the Mail widget (best effort; see `SyncStatus`).
+    private func report(phase: String, started: Date, processed: Int = 0, total: Int? = nil) {
+        let status = SyncStatus(
+            state: .running, phase: phase, pid: getpid(), started: started, updated: now(),
+            processed: processed, total: total)
+        onStatus?(status)
+        statusFile.map { status.write(to: $0) }
+    }
+
+    /// Sees every progress status as it is published (tests use this to watch a sync from inside).
+    var onStatus: ((SyncStatus) -> Void)?
 
     // MARK: - Snapshot rows
 
@@ -130,6 +149,7 @@ public final class MailSync {
         defer { snapshot.close() }
         try snapshot.validateSchema()
         let capabilities = try snapshot.capabilities()
+        report(phase: "reading", started: started)
 
         // 2. Now the store may be opened (and created, on a first run).
         let store = try MailStore(path: storeURL)
@@ -182,6 +202,7 @@ public final class MailSync {
 
         // 6. New (and, under --full, re-indexed) messages, in batches.
         var added = 0
+        report(phase: "indexing", started: started, processed: 0, total: toIndex.count)
         for start in stride(from: 0, to: toIndex.count, by: Self.batchSize) {
             let batch = Array(toIndex[start..<min(start + Self.batchSize, toIndex.count)])
             let ids = batch.map(\.message.id)
@@ -198,6 +219,7 @@ public final class MailSync {
                 }
             }
             added += batch.filter(\.isNew).count
+            report(phase: "indexing", started: started, processed: start + batch.count, total: toIndex.count)
         }
 
         // 7. Flag changes, removals and the sync state, together.

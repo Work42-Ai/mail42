@@ -56,6 +56,9 @@ final class MailModel {
     private(set) var reader: MailReaderState = .none
     private(set) var attachments: [MailAttachment] = []
     private(set) var lastSync: Date?
+    /// The live progress of a `mail42 sync` that is running right now (from this widget, the background agent or
+    /// an agent's terminal), or nil. While it is set the tile says "loading" instead of showing an empty state.
+    private(set) var progress: MailSyncProgress?
     /// A short, transient message under the toolbar ("Saved report.pdf").
     private(set) var notice: String?
 
@@ -80,14 +83,20 @@ final class MailModel {
         self.services = services
         Task { await bootstrap() }
         pollTask?.cancel()
+        progress = MailSyncProgress.current()
         pollTask = Task { [weak self] in
             var last = MailStoreSignature.current()
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
+                try? await Task.sleep(for: .seconds(1))
+                guard let self else { return }
+                // Progress is read every second so the bar moves; the list only reloads when mail.db changes.
+                let live = MailSyncProgress.current()
+                let finished = self.progress != nil && live == nil
+                if live != self.progress { self.progress = live }
                 let current = MailStoreSignature.current()
-                if current != last {
+                if current != last || finished {
                     last = current
-                    await self?.refreshQuietly()
+                    await self.refreshQuietly()
                 }
             }
         }
@@ -264,7 +273,9 @@ final class MailModel {
             }
         }
         if unreadOnly { parts.append("unread only") }
-        if let lastSync {
+        if progress != nil {
+            parts.append("syncing…")
+        } else if let lastSync {
             parts.append("synced \(RelativeDateTimeFormatter().localizedString(for: lastSync, relativeTo: Date()))")
         }
         return parts.joined(separator: " · ")
@@ -389,7 +400,7 @@ final class MailModel {
     private func openReader(id: Int64, generation: Int) async {
         do {
             guard let directory = readerDirectory() else {
-                throw MailFailure(code: "no_session", message: "This widget has no session folder to show the message from.")
+                throw MailFailure(code: "no_folder", message: "mail42 couldn't prepare a folder to show the message from.")
             }
             let key = "\(id)-\(UUID().uuidString.prefix(8).lowercased())"
             let file = directory.appendingPathComponent("m\(key).html")
@@ -421,32 +432,39 @@ final class MailModel {
         }
     }
 
-    /// `<session folder>/artifacts/mail42-reader`: the artifact server serves this folder to the web view.
+    // The reader's HTML lives in mail42's own folder, which is registered with the artifact server under mail42's
+    // own id (a stand-in "session"). The widget therefore works in a session tab and on the session-less
+    // workspace home alike (where `services.sessionId` is nil), and never fills a session's artifact gallery.
+    private static let readerHostID = "mail42-reader"
+
+    private static var readerBase: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".work42/mail42/reader", isDirectory: true)
+    }
+
+    private static var readerFolder: URL {
+        readerBase.appendingPathComponent("artifacts/\(readerArtifactID)", isDirectory: true)
+    }
+
+    /// `~/.work42/mail42/reader/artifacts/mail42-reader`: the artifact server serves this folder to the web view.
     private func readerDirectory() -> URL? {
-        guard let services else { return nil }
-        guard let base = services.sessionId.flatMap({ ArtifactRuntime.directory(forSessionId: $0) }) ?? services.worktreePath,
-              !base.isEmpty else { return nil }
-        // Make the session known to the artifact server, as meet42's pinned-artifact widgets do.
-        if let sessionId = services.sessionId, ArtifactRuntime.directory(forSessionId: sessionId) == nil {
-            try? ArtifactRuntime.register(sessionId: sessionId, directory: base)
+        if ArtifactRuntime.directory(forSessionId: Self.readerHostID) != Self.readerBase.path {
+            try? ArtifactRuntime.register(sessionId: Self.readerHostID, directory: Self.readerBase.path)
         }
-        let directory = URL(fileURLWithPath: base).appendingPathComponent("artifacts/\(Self.readerArtifactID)", isDirectory: true)
+        let directory = Self.readerFolder
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
     }
 
     private func readerURL(fileName: String) -> URL? {
-        guard let sessionId = services?.sessionId,
-              let base = ArtifactRuntime.url(sessionId: sessionId, artifactId: Self.readerArtifactID) else { return nil }
+        guard let base = ArtifactRuntime.url(sessionId: Self.readerHostID, artifactId: Self.readerArtifactID)
+        else { return nil }
         return URL(string: base.absoluteString + fileName)
     }
 
     /// Keeps the newest few reader files; the rest are disposable.
     private func removeReaderFiles(keeping keep: Int) {
-        guard let services,
-              let base = services.sessionId.flatMap({ ArtifactRuntime.directory(forSessionId: $0) }) ?? services.worktreePath
-        else { return }
-        let directory = URL(fileURLWithPath: base).appendingPathComponent("artifacts/\(Self.readerArtifactID)", isDirectory: true)
+        let directory = Self.readerFolder
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
         let ordered = files.filter { $0.pathExtension == "html" }.sorted {

@@ -122,6 +122,50 @@ nonisolated struct MailSyncSummary: Codable, Equatable {
     let removed: Int
 }
 
+/// The live progress of a running `mail42 sync`, which the CLI keeps in `~/.work42/mail42/sync-status.json`.
+/// `current()` is nil unless a sync is really running (a crashed sync leaves a stale file behind).
+nonisolated struct MailSyncProgress: Decodable, Equatable {
+    let state: String
+    let phase: String?
+    let pid: Int32?
+    let started: Date?
+    let updated: Date?
+    let processed: Int
+    let total: Int?
+
+    /// A "running" file nobody has touched for this long is dead.
+    static let staleAfter: TimeInterval = 600
+
+    private static var fileURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".work42/mail42/sync-status.json")
+    }
+
+    /// 0…1 once the total is known.
+    var fraction: Double? {
+        guard let total, total > 0 else { return nil }
+        return min(1, Double(processed) / Double(total))
+    }
+
+    /// A rough time left, from how fast this run has gone so far. Nil until there is enough to go on.
+    func secondsLeft(now: Date = Date()) -> Int? {
+        guard let started, let total, processed >= 100, total > processed else { return nil }
+        let elapsed = now.timeIntervalSince(started)
+        guard elapsed > 5 else { return nil }
+        return Int((Double(total - processed) / (Double(processed) / elapsed)).rounded())
+    }
+
+    static func current(now: Date = Date()) -> MailSyncProgress? {
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let status = try? decoder.decode(MailSyncProgress.self, from: data), status.state == "running"
+        else { return nil }
+        if let last = status.updated ?? status.started, now.timeIntervalSince(last) > staleAfter { return nil }
+        if let pid = status.pid, kill(pid, 0) != 0, errno != EPERM { return nil }
+        return status
+    }
+}
+
 /// `mail42 permissions --json` (the exit code carries granted / not granted; this is for the details).
 nonisolated struct MailPermissionsReport: Codable, Equatable {
     let fullDiskAccess: String

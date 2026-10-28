@@ -405,6 +405,52 @@ import Mail42TestSupport
         #expect(try h.store().getState(MailStore.StateKey.lastRowID) == "1250")
     }
 
+    // MARK: - Progress for the Mail widget
+
+    @Test func aSyncPublishesItsProgressAndEndsIdle() throws {
+        let h = try Harness()
+        defer { h.cleanup() }
+        try inbox(h)
+        let base = nowSeconds - 1_000
+        try h.mail.inTransaction {
+            for rowid in Int64(1)...1_250 {
+                try h.mail.addMessage(.init(rowid: rowid, subject: "Message \(rowid)", senderAddress: "a@b.com",
+                                            mailboxID: 1, dateReceived: base + rowid))
+            }
+        }
+        let statusURL = h.storeURL.deletingLastPathComponent().appendingPathComponent("sync-status.json")
+        let sync = MailSync(storeURL: h.storeURL, library: h.mail.library, traceFile: nil, statusFile: statusURL,
+                            now: { MailSyncTests.now })
+        var seen: [SyncStatus] = []
+        sync.onStatus = { seen.append($0) }
+
+        _ = try sync.run()
+
+        // reading, then the total, then one update per 500-message batch.
+        #expect(seen.map(\.phase) == ["reading", "indexing", "indexing", "indexing", "indexing"])
+        #expect(seen.map(\.processed) == [0, 0, 500, 1_000, 1_250])
+        #expect(seen.last?.total == 1_250)
+        #expect(seen.allSatisfy { $0.state == .running && $0.pid == getpid() })
+        #expect(seen.last?.fraction == 1)
+        // And the file ends as idle, so the widget stops showing "loading".
+        let final = try #require(SyncStatus.read(from: statusURL))
+        #expect(final.state == .idle)
+        #expect(final.finished == MailSyncTests.now)
+        #expect(!final.isRunning())
+    }
+
+    @Test func aFailedSyncLeavesTheStatusIdle() throws {
+        let h = try Harness(schemaOmitting: ["messages.size"])
+        defer { h.cleanup() }
+        let statusURL = h.storeURL.deletingLastPathComponent().appendingPathComponent("sync-status.json")
+        let sync = MailSync(storeURL: h.storeURL, library: h.mail.library, traceFile: nil, statusFile: statusURL,
+                            now: { MailSyncTests.now })
+
+        #expect(throws: Mail42Error.self) { try sync.run() }
+
+        #expect(SyncStatus.read(from: statusURL)?.state == .idle)
+    }
+
     @Test func seesMailThatSitsOnlyInTheWAL() throws {
         let h = try Harness(wal: true)
         defer { h.cleanup() }
