@@ -13,6 +13,20 @@ public struct EnvelopeRecord: Equatable, Sendable {
     public var mailboxRole: String
     public var to: [RecipientRow]
     public var cc: [RecipientRow]
+
+    public init(
+        row: EnvelopeRow, accountID: String, accountName: String, accountEmail: String?, mailboxName: String,
+        mailboxRole: String, to: [RecipientRow], cc: [RecipientRow]
+    ) {
+        self.row = row
+        self.accountID = accountID
+        self.accountName = accountName
+        self.accountEmail = accountEmail
+        self.mailboxName = mailboxName
+        self.mailboxRole = mailboxRole
+        self.to = to
+        self.cc = cc
+    }
 }
 
 /// Which mailbox(es) `envelope list` reads.

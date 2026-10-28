@@ -138,6 +138,8 @@ public final class EnvelopeIndexBuilder {
         try createTable("attachments", [
             ("ROWID", "INTEGER PRIMARY KEY"), ("message", "INTEGER"), ("attachment_id", "TEXT"), ("name", "TEXT"),
         ])
+        // Gmail keeps every message in [Gmail]/All Mail; a label (Inbox, Important, …) is a row here.
+        try createTable("labels", [("message_id", "INTEGER"), ("mailbox_id", "INTEGER")])
         try createTable("summaries", [("ROWID", "INTEGER PRIMARY KEY"), ("summary", "TEXT")])
         try createTable("message_global_data", [("ROWID", "INTEGER PRIMARY KEY"), ("message_id_header", "TEXT")])
     }
@@ -190,6 +192,60 @@ public final class EnvelopeIndexBuilder {
         try conn.query(
             "INSERT INTO attachments (message, attachment_id, name) VALUES (?, ?, ?)",
             [.int(messageRowid), .text(attachmentID), .text(name)]) { _ in }
+    }
+
+    /// Labels a message with a mailbox, the way Gmail accounts do (the message itself stays in All Mail).
+    public func addLabel(messageRowid: Int64, mailboxID: Int64) throws {
+        try conn.query(
+            "INSERT INTO labels (message_id, mailbox_id) VALUES (?, ?)", [.int(messageRowid), .int(mailboxID)]) { _ in }
+    }
+
+    /// One row of the system Accounts database, as far as mail42 reads it.
+    public struct AccountFixture {
+        public var pk: Int64
+        public var identifier: String
+        public var username: String?
+        public var description: String?
+        public var parent: Int64?
+        public var type: String
+        public init(pk: Int64, identifier: String, username: String? = nil, description: String? = nil,
+                    parent: Int64? = nil, type: String = "IMAP") {
+            self.pk = pk
+            self.identifier = identifier
+            self.username = username
+            self.description = description
+            self.parent = parent
+            self.type = type
+        }
+    }
+
+    /// Writes `<tmp>/Library/Accounts/Accounts4.sqlite` with the columns mail42 reads, and returns its URL.
+    @discardableResult
+    public func writeAccountsDatabase(_ accounts: [AccountFixture]) throws -> URL {
+        let directory = root.appendingPathComponent("Library/Accounts", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("Accounts4.sqlite")
+        let db = try SQLiteConnection(path: url.path, readOnly: false)
+        defer { db.close() }
+        try db.execute("""
+            CREATE TABLE ZACCOUNTTYPE (Z_PK INTEGER PRIMARY KEY, ZACCOUNTTYPEDESCRIPTION VARCHAR);
+            CREATE TABLE ZACCOUNT (Z_PK INTEGER PRIMARY KEY, ZIDENTIFIER VARCHAR, ZUSERNAME VARCHAR,
+                                   ZACCOUNTDESCRIPTION VARCHAR, ZPARENTACCOUNT INTEGER, ZACCOUNTTYPE INTEGER);
+            """)
+        var typeIDs: [String: Int64] = [:]
+        for account in accounts {
+            if typeIDs[account.type] == nil {
+                let id = Int64(typeIDs.count + 1)
+                typeIDs[account.type] = id
+                try db.query("INSERT INTO ZACCOUNTTYPE VALUES (?, ?)", [.int(id), .text(account.type)]) { _ in }
+            }
+            try db.query(
+                "INSERT INTO ZACCOUNT VALUES (?, ?, ?, ?, ?, ?)",
+                [.int(account.pk), .text(account.identifier), account.username.map(SQLiteValue.text) ?? .null,
+                 account.description.map(SQLiteValue.text) ?? .null, account.parent.map(SQLiteValue.int) ?? .null,
+                 .int(typeIDs[account.type] ?? 0)]) { _ in }
+        }
+        return url
     }
 
     public func setRead(rowid: Int64, _ read: Bool) throws {

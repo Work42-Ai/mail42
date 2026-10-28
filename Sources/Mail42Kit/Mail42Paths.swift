@@ -14,6 +14,20 @@ public enum Mail42Paths {
         public static let root = "MAIL42_ROOT"
         /// Replaces `~/Library/Mail` (the folder holding Apple Mail's `V10`).
         public static let mailLibrary = "MAIL42_MAIL_LIBRARY"
+        /// Replaces `~/Library/Accounts/Accounts4.sqlite` (where macOS records each account's address).
+        public static let accountsDatabase = "MAIL42_ACCOUNTS_DB"
+    }
+
+    /// `~/Library/Accounts/Accounts4.sqlite`, or `$MAIL42_ACCOUNTS_DB` when set.
+    public static var accountsDatabase: URL { accountsDatabase(environment: ProcessInfo.processInfo.environment) }
+
+    /// `accountsDatabase` for an explicit environment, so the rule is testable.
+    public static func accountsDatabase(environment: [String: String]) -> URL {
+        if let path = environment[Override.accountsDatabase], !path.isEmpty {
+            return URL(fileURLWithPath: path)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Accounts/Accounts4.sqlite")
     }
 
     /// `~/.work42/mail42`, or `$MAIL42_ROOT` when set.
