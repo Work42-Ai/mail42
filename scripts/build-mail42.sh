@@ -28,7 +28,11 @@ IDENTIFIER="com.work42.mail42"
 cd "$PKG_DIR"
 
 echo "==> swift build (-c $CONFIG)" >&2
+# -file-prefix-map / -debug-prefix-map rewrite the build directory in every path the compiler embeds (assertion and
+# diagnostic strings, debug info), so a shipped binary does not carry the builder's home directory or checkout name.
 swift build -c "$CONFIG" --product mail42 \
+  -Xswiftc -file-prefix-map -Xswiftc "$PKG_DIR=." \
+  -Xswiftc -debug-prefix-map -Xswiftc "$PKG_DIR=." \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$PLIST" >&2
 
 BIN="$(swift build -c "$CONFIG" --product mail42 --show-bin-path)/mail42"
@@ -40,6 +44,13 @@ APP="$PKG_DIR/.build/bundle/mail42.app"
 VERSION="$(sed -n 's/^let mail42Version = "\(.*\)"$/\1/p' "$PKG_DIR/Sources/mail42/main.swift")"
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/mail42"
+# Drop the symbol table and debug-map entries (they hold the absolute path of every object file).
+strip -S -x "$APP/Contents/MacOS/mail42"
+# The build must not leak where it was made: fail loudly if the builder's home directory is still in the binary.
+if LC_ALL=C grep -a -F -q "$HOME" "$APP/Contents/MacOS/mail42"; then
+  echo "ERROR: the built binary still contains the path $HOME; refusing to bundle it." >&2
+  exit 1
+fi
 cp "$PLIST" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" \
   -c "Add :CFBundleVersion string $VERSION" "$APP/Contents/Info.plist"
