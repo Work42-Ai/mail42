@@ -223,20 +223,20 @@ import Mail42TestSupport
         let b = try EnvelopeIndexBuilder(); defer { b.cleanup() }
         try twoAccounts(b)
         let db = try b.writeAccountsDatabase([
-            .init(pk: 18, identifier: "PARENT-1", username: "yansaro@gmail.com", description: "Google", type: "Gmail"),
+            .init(pk: 18, identifier: "PARENT-1", username: "user@example.com", description: "Google", type: "Gmail"),
             .init(pk: 19, identifier: Self.gmail, parent: 18),                       // the IMAP account has no name of its own
-            .init(pk: 24, identifier: "PARENT-2", username: "yan@web42.ai", description: "yan@web42.ai", type: "Gmail"),
+            .init(pk: 24, identifier: "PARENT-2", username: "work@example.com", description: "work@example.com", type: "Gmail"),
             .init(pk: 25, identifier: Self.icloud.lowercased(), parent: 24),         // identifiers compare case-insensitively
             .init(pk: 14, identifier: Self.local, description: "On My Mac", type: "Local"),
         ])
         let accounts = try live(b, accounts: db).accounts()
 
-        #expect(accounts.map(\.name) == ["Google", "On My Mac", "yan@web42.ai"])             // sorted by name
+        #expect(accounts.map(\.name) == ["Google", "On My Mac", "work@example.com"])             // sorted by name
         let byID = Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, $0) })
         #expect(byID[Self.gmail]?.name == "Google")
-        #expect(byID[Self.gmail]?.email == "yansaro@gmail.com")
-        #expect(byID[Self.icloud]?.name == "yan@web42.ai")
-        #expect(byID[Self.icloud]?.email == "yan@web42.ai")
+        #expect(byID[Self.gmail]?.email == "user@example.com")
+        #expect(byID[Self.icloud]?.name == "work@example.com")
+        #expect(byID[Self.icloud]?.email == "work@example.com")
         #expect(try live(b, accounts: db).listEnvelopes(.init(mailbox: .id(1))).first?.accountName == "Google")
     }
 
