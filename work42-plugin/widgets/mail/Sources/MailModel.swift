@@ -55,6 +55,11 @@ private struct ReaderEntry {
 @Observable
 final class MailModel {
 
+    /// The one model of the Mail42 tile. The header (drawn by Work42 around the tile) and the body must read the SAME
+    /// state: with a model per view the header never saw the list the body had loaded (it said "0 unread · 0 messages"
+    /// and its buttons stayed dimmed).
+    static let shared = MailModel()
+
     // MARK: - What the user chose
 
     var selection: MailSelection = .allInboxes
@@ -602,6 +607,11 @@ final class MailModel {
         }
     }
 
+    /// A message of the conversation was clicked: open it, or close it again if it is the open one (an accordion).
+    func toggle(_ id: Int64) {
+        if id == expandedID { collapse() } else { expand(id) }
+    }
+
     /// Opens another message of the conversation (a collapsed row was clicked, or ← →).
     func expand(_ id: Int64) {
         guard id != expandedID, let target = thread.first(where: { $0.id == id }) else { return }
@@ -611,15 +621,44 @@ final class MailModel {
         if !target.isRead { Task { await setRead(target, true) } }
     }
 
+    /// Folds the open message back to a line; every message of the conversation is then one row.
+    func collapse() {
+        expandedID = nil
+        showDetails = false
+        readerGeneration += 1
+        reader = .none
+        attachments = []
+    }
+
+    /// Back to "no message selected" (Esc, or the Back button above the reader).
+    func deselect() {
+        missingMessage = false
+        clearSelection()
+    }
+
     func moveInThread(by step: Int) {
-        guard let current = thread.firstIndex(where: { $0.id == expandedID }) else { return }
+        guard !thread.isEmpty else { return }
+        guard let current = thread.firstIndex(where: { $0.id == expandedID }) else {
+            expand(step > 0 ? thread[0].id : thread[thread.count - 1].id)      // all folded: open the first (or last)
+            return
+        }
         let target = current + step
         if thread.indices.contains(target) { expand(thread[target].id) }
     }
 
-    /// The message whose body is open (it may be an earlier one of the conversation).
+    /// The message whose body is open (it may be an earlier one of the conversation); nil when all are folded.
     var expandedEnvelope: MailEnvelope? {
-        thread.first { $0.id == expandedID } ?? selectedEnvelope
+        guard let expandedID else { return nil }
+        return thread.first { $0.id == expandedID } ?? (selectedEnvelope?.id == expandedID ? selectedEnvelope : nil)
+    }
+
+    /// How many unread messages the current view holds, for the empty state's one-line summary.
+    var unreadInView: Int64 {
+        switch selection {
+        case .allInboxes: return tree.flatMap(\.mailboxes).filter { $0.role == "inbox" }.reduce(0) { $0 + $1.unread }
+        case .flagged: return 0
+        case .mailbox(let id): return mailbox(id)?.unread ?? 0
+        }
     }
 
     /// True when the open message was reached by a link and the list is showing something else.

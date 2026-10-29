@@ -1,15 +1,18 @@
-// MailBodyTheme.swift — puts a message in Work42's theme.
+// MailBodyTheme.swift — puts a message in Work42's theme, the way Gmail restyles mail to fit its own look.
 //
 // `mail42 message read --html` gives the sender's HTML, already made safe (no scripts, no event handlers). Shown as it
 // is, a plain mail looks like a 1995 web page (a serif font, browser-blue links, lines as wide as the window) and
 // clashes with the rest of Work42. This wraps it in the same `--w42-*` tokens the artifacts use, so it takes the
 // app's font, colours and accent, light or dark, a custom theme included.
 //
-// Two kinds of mail:
-//   · Ordinary mail (plain text, or HTML that sets no colours of its own) is themed: system font at the app's body
-//     size, theme text colours, accent links, a readable line length, and the quoted history folded away.
-//   · Designed mail (newsletters, receipts: it sets its own colours or backgrounds) is kept exactly as designed, on a
-//     light rounded card, because its own colours were chosen for a white page and would be unreadable on a dark one.
+// Three kinds of mail:
+//   · Ordinary mail (plain text, or HTML that sets no colours) takes the theme: the app's background, text colours,
+//     font and body size, accent links, a readable line length, the quoted history folded away.
+//   · Mail that sets only TEXT colours (a Gmail reply with `color:rgb(34,34,34)` spans) takes the theme's text colours
+//     too: its own dark text would vanish on a dark theme. Links keep the accent.
+//   · Designed mail (newsletters, receipts: it paints its own backgrounds) keeps its design, because its colours were
+//     chosen together. Light theme: as designed. Dark theme: adapted automatically, as Gmail's dark mode does (the
+//     colours are inverted and the images put back), so a white newsletter becomes dark instead of a white slab.
 //
 // No JavaScript: the dark variant is a `prefers-color-scheme` media query and the quote fold is a `<details>`.
 // Foundation only, so it can be tried outside the app.
@@ -35,12 +38,13 @@ nonisolated enum MailBodyTheme {
             page = "<!doctype html><html><head><meta charset=\"utf-8\">\n" + style + "</head><body>" + page + "</body></html>"
         }
 
-        if designed,
-           let body = page.range(of: "<body", options: .caseInsensitive),
+        // The message goes in one wrapper that says which kind it is.
+        let kind = designed ? "m42-card" : (setsTextColors(html) ? "m42-plain m42-force" : "m42-plain")
+        if let body = page.range(of: "<body", options: .caseInsensitive),
            let open = page.range(of: ">", range: body.upperBound..<page.endIndex),
            let end = page.range(of: "</body>", options: [.caseInsensitive, .backwards]) {
             page.insert(contentsOf: "</div>", at: end.lowerBound)
-            page.insert(contentsOf: "<div class=\"m42-card\">", at: open.upperBound)
+            page.insert(contentsOf: "<div class=\"\(kind)\">", at: open.upperBound)
         }
         return page
     }
@@ -54,12 +58,19 @@ nonisolated enum MailBodyTheme {
 
     // MARK: - Which kind of mail
 
-    /// True when the HTML sets colours or backgrounds of its own.
+    /// True when the HTML paints backgrounds of its own: a designed mail, kept as designed.
     static func isDesigned(_ html: String) -> Bool {
         let patterns = [
             #"\bbgcolor\s*="#,
-            #"<font[^>]*\bcolor\s*="#,
             #"(?<![-\w])background(-color|-image)?\s*[:=]\s*(?!\s*(transparent|none|inherit|initial|unset|rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)))"#,
+        ]
+        return patterns.contains { html.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil }
+    }
+
+    /// True when the HTML sets text colours of its own (but, see `isDesigned`, no backgrounds).
+    static func setsTextColors(_ html: String) -> Bool {
+        let patterns = [
+            #"<font[^>]*\bcolor\s*="#,
             #"(?<![-\w])color\s*:\s*(?!\s*(inherit|initial|unset|currentcolor))"#,
         ]
         return patterns.contains { html.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil }
@@ -108,27 +119,38 @@ nonisolated enum MailBodyTheme {
         if designed {
             return common + """
 
-            body { padding: 14px 20px; }
+            body { padding: 14px 20px 28px; }
             .m42-card { background: #ffffff; color: #1d1d1f; color-scheme: light; border-radius: 12px; padding: 16px;
                         overflow-x: auto; box-shadow: 0 1px 3px rgba(0,0,0,.18); }
+            @media (prefers-color-scheme: dark) {
+              /* Gmail-style dark mode: invert the whole card, then invert the pictures back so photos keep their colours. */
+              .m42-card { filter: invert(0.9) hue-rotate(180deg); box-shadow: none; }
+              .m42-card img, .m42-card picture, .m42-card video, .m42-card canvas, .m42-card svg image,
+              .m42-card [style*="background-image"] { filter: invert(1) hue-rotate(180deg); }
+            }
             """
         }
         return common + """
 
-        body { padding: 16px 24px 32px; color: var(--w42-text-primary); font-family: var(--w42-font-family, -apple-system, system-ui);
-               font-size: 15px; line-height: 1.6; max-width: 72ch; overflow-wrap: anywhere; }
-        a { color: var(--w42-accent, var(--w42-primary, #0a84ff)); text-decoration: none; }
-        a:hover { text-decoration: underline; }
-        p { margin: 0 0 12px; }
-        pre { white-space: pre-wrap; font-family: inherit; font-size: inherit; margin: 0; }
-        blockquote { margin: 8px 0; padding: 2px 0 2px 14px; border-left: 3px solid var(--w42-accent, var(--w42-primary, #0a84ff));
+        body { padding: 16px 24px 32px; }
+        .m42-plain { max-width: 72ch; color: var(--w42-text-primary); font-family: var(--w42-font-family, -apple-system, system-ui);
+               font-size: 15px; line-height: 1.6; overflow-wrap: anywhere; }
+        /* Mail that only sets text colours: the theme's text colour wins (a dark grey on a dark theme can't be read). */
+        .m42-force, .m42-force * { color: var(--w42-text-primary) !important; }
+        .m42-plain a, .m42-plain a *, .m42-force a, .m42-force a * { color: var(--w42-accent, var(--w42-primary, #0a84ff)) !important; text-decoration: none; }
+        .m42-plain a:hover { text-decoration: underline; }
+        .m42-plain p { margin: 0 0 12px; }
+        /* The CLI writes plain-text mail inside <pre style="font:-apple-system-body">: that inline style would win. */
+        .m42-plain pre { white-space: pre-wrap !important; font: inherit !important; margin: 0; }
+        .m42-plain blockquote { margin: 8px 0; padding: 2px 0 2px 14px; border-left: 3px solid var(--w42-accent, var(--w42-primary, #0a84ff));
                      color: var(--w42-text-secondary, var(--w42-text-primary)); }
+        .m42-plain blockquote, .m42-plain blockquote * { color: var(--w42-text-secondary, var(--w42-text-primary)) !important; }
         details.m42-quote { margin: 10px 0; }
         details.m42-quote > summary { display: inline-block; cursor: pointer; list-style: none; font-size: 13px; padding: 2px 10px;
                      border-radius: 999px; background: var(--w42-chip, rgba(128,128,128,.18)); color: var(--w42-text-secondary, inherit); }
         details.m42-quote > summary::-webkit-details-marker { display: none; }
         details.m42-quote[open] > summary { margin-bottom: 6px; }
-        table { max-width: 100%; }
+        .m42-plain table { max-width: 100%; }
         """
     }
 }

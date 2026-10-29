@@ -1,5 +1,6 @@
-// MailReader.swift — the right-hand pane: a conversation as a stack of messages, the open one expanded (header,
-// attachment cards, the message in Work42's theme) and the others folded to one line each.
+// MailReader.swift — the right-hand pane: a bar (aligned with the search field on the left), then a conversation as a
+// stack of messages that open and close like an accordion (click a message to read it, click it again to fold it),
+// or, with nothing selected, a quiet empty state.
 //
 // The body is the sanitised HTML `mail42 message read --html --out` wrote, put in Work42's theme (MailBodyTheme) and
 // shown by the SDK's BrowserSurface with its chrome hidden. The surface owns highlight-to-comment; the resolver below
@@ -10,62 +11,155 @@ import SwiftUI
 import Work42PluginKit
 import Work42UI
 
+/// The height of the bar above the list (the search field) and above the reader. They are the same, so the line
+/// under them is one straight line across the tile.
+let mailBarHeight: CGFloat = 58
+
 struct MailReaderPane: View {
     let model: MailModel
     let services: SessionServices
 
     var body: some View {
-        Group {
-            if model.missingMessage {
-                MailPlaceholder(
-                    symbol: "tray", title: "This message is no longer in Mail",
-                    text: "It may have been deleted, or it is in an account that isn\u{2019}t set up on this Mac.")
-            } else if let open = model.expandedEnvelope {
-                MailThread(model: model, services: services, open: open)
+        VStack(spacing: 0) {
+            MailReaderBar(model: model)
+            Divider().opacity(0.4)
+            Group {
+                if model.missingMessage {
+                    MailPlaceholder(
+                        symbol: "tray", title: "This message is no longer in Mail",
+                        text: "It may have been deleted, or it is in an account that isn\u{2019}t set up on this Mac.")
+                } else if model.selectedEnvelope != nil {
+                    MailThread(model: model, services: services)
+                } else {
+                    MailEmptyReader(model: model)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+// MARK: - The bar
+
+/// Back to "nothing selected", how many messages the conversation has, and where a linked message lives.
+private struct MailReaderBar: View {
+    let model: MailModel
+
+    var body: some View {
+        HStack(spacing: DT.s12) {
+            if let selected = model.selectedEnvelope {
+                Button { model.deselect() } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left").font(.system(size: DT.f11, weight: .semibold))
+                        Text("Back").font(.system(size: DT.f12, weight: .medium))
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background(Capsule().fill(DT.chipFill))
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Back to the list  \u{238B}")
+                let count = max(model.thread.count, 1)
+                Text(count > 1 ? "\(count) messages" : "1 message")
+                    .font(.system(size: DT.f11)).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                if model.isOutsideView {
+                    Label("In \(selected.mailbox.name) \u{00B7} \(selected.account.name)", systemImage: "tray")
+                        .font(.system(size: DT.f11)).foregroundStyle(.secondary).lineLimit(1)
+                }
             } else {
-                MailPlaceholder(symbol: "envelope.open", title: "Select a message", text: "Pick one on the left to read it here.")
+                Spacer(minLength: 0)
             }
         }
+        .padding(.horizontal, DT.s20)
+        .frame(height: mailBarHeight)
+    }
+}
+
+// MARK: - Nothing selected
+
+private struct MailEmptyReader: View {
+    let model: MailModel
+
+    var body: some View {
+        VStack(spacing: DT.s12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 22, style: .continuous).fill(DT.systemAccent.opacity(0.12))
+                Image(systemName: "envelope.open.fill")
+                    .font(.system(size: 34, weight: .regular))
+                    .foregroundStyle(DT.systemAccent)
+            }
+            .frame(width: 84, height: 84)
+            Text("No message selected").font(.system(size: DT.f15, weight: .semibold))
+            Text(summary)
+                .font(.system(size: DT.f12))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            HStack(spacing: DT.s12) {
+                hint("\u{2191} \u{2193}", "move")
+                hint("\u{21A9}", "open")
+                hint("\u{2318}N", "new message")
+                hint("\u{238B}", "back")
+            }
+            .padding(.top, DT.s8)
+        }
+        .padding(DT.s20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var summary: String {
+        let unread = model.unreadInView
+        if model.envelopes.isEmpty { return "Nothing in \(model.title) yet." }
+        return unread > 0
+            ? "\(unread.formatted()) unread in \(model.title).\nPick a conversation on the left to read it here."
+            : "You\u{2019}re all caught up in \(model.title).\nPick a conversation on the left to read it here."
+    }
+
+    private func hint(_ keys: String, _ label: String) -> some View {
+        HStack(spacing: 6) {
+            Text(keys)
+                .font(.system(size: DT.f10, weight: .medium, design: .rounded))
+                .padding(.horizontal, 7).padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(DT.chipFill))
+            Text(label).font(.system(size: DT.f11)).foregroundStyle(.secondary)
+        }
     }
 }
 
 // MARK: - The conversation
 
+/// Every message of the conversation as a row; the open one shows its header and body in place.
 private struct MailThread: View {
     let model: MailModel
     let services: SessionServices
-    let open: MailEnvelope
 
     var body: some View {
-        let messages = model.thread.isEmpty ? [open] : model.thread
-        let index = messages.firstIndex { $0.id == open.id } ?? 0
-        let earlier = Array(messages[..<index])
-        let later = Array(messages[(index + 1)...])
+        let messages = model.thread.isEmpty ? (model.selectedEnvelope.map { [$0] } ?? []) : model.thread
+        let openIndex = messages.firstIndex { $0.id == model.expandedID }
 
-        VStack(spacing: 0) {
-            if messages.count > 1 || model.isOutsideView {
-                HStack(spacing: DT.s8) {
-                    Text(messages.count > 1 ? "\(messages.count) messages" : "1 message")
-                        .font(.system(size: DT.f11)).foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                    if model.isOutsideView {
-                        Label("In \(open.mailbox.name) \u{00B7} \(open.account.name)", systemImage: "tray")
-                            .font(.system(size: DT.f11)).foregroundStyle(.secondary)
+        if let openIndex {
+            VStack(spacing: 0) {
+                if openIndex > 0 { folded(Array(messages[..<openIndex])) }
+                MailOpenMessage(model: model, services: services, envelope: messages[openIndex])
+                    .frame(maxHeight: .infinity)
+                if openIndex < messages.count - 1 { folded(Array(messages[(openIndex + 1)...])) }
+            }
+        } else {
+            // Everything folded: the whole conversation as rows.
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(messages) { message in
+                        MailCollapsedRow(model: model, envelope: message)
+                        Divider().opacity(0.3)
                     }
                 }
-                .padding(.horizontal, DT.s20)
-                .padding(.vertical, DT.s8)
             }
-            if !earlier.isEmpty { collapsed(earlier) }
-            MailOpenMessage(model: model, services: services, envelope: open)
-                .frame(maxHeight: .infinity)
-            if !later.isEmpty { collapsed(later) }
         }
     }
 
-    /// Folded messages, scrolling when there are many so the open one keeps its room.
-    private func collapsed(_ messages: [MailEnvelope]) -> some View {
+    /// Folded messages above or below the open one; they scroll when there are many, so the open one keeps its room.
+    private func folded(_ messages: [MailEnvelope]) -> some View {
         ScrollView {
             VStack(spacing: 0) {
                 ForEach(messages) { message in
@@ -79,14 +173,18 @@ private struct MailThread: View {
     }
 }
 
-/// An earlier (or later) message of the conversation, as one line. Clicking opens it.
+/// A message of the conversation as one line. Clicking opens it.
 private struct MailCollapsedRow: View {
     let model: MailModel
     let envelope: MailEnvelope
 
     var body: some View {
-        Button { model.expand(envelope.id) } label: {
+        Button { model.toggle(envelope.id) } label: {
             HStack(spacing: 10) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: DT.f10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 10)
                 Circle()
                     .fill(envelope.isRead ? Color.clear : DT.systemAccent)
                     .frame(width: 7, height: 7)
@@ -125,7 +223,6 @@ private struct MailOpenMessage: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Divider().opacity(0.4)
             MailMessageHeader(model: model, envelope: envelope)
             if !model.attachments.isEmpty {
                 MailAttachmentCards(model: model, attachments: model.attachments)
@@ -141,37 +238,43 @@ private struct MailMessageHeader: View {
     let envelope: MailEnvelope
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DT.s12) {
-            HStack(alignment: .top, spacing: DT.s12) {
-                MailAvatar(person: envelope.from, size: 40, isMe: model.isMine(envelope))
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: DT.s8) {
-                        Text(model.isMine(envelope) ? "You" : envelope.from.display)
-                            .font(.system(size: DT.f13, weight: .semibold))
-                            .textSelection(.enabled)
-                        if let addr = envelope.from.addr, addr != envelope.from.display {
-                            Text(addr).font(.system(size: DT.f11)).foregroundStyle(.secondary).lineLimit(1)
-                        }
-                        Spacer(minLength: DT.s8)
-                        Label("\(envelope.mailbox.name) \u{00B7} \(envelope.account.name)", systemImage: "tray")
-                            .font(.system(size: DT.f11)).foregroundStyle(.secondary).lineLimit(1)
-                        Text(MailDates.full.string(from: envelope.date))
-                            .font(.system(size: DT.f11)).foregroundStyle(.secondary)
-                    }
-                    Text(envelope.subject.isEmpty ? "(no subject)" : envelope.subject)
-                        .font(.system(size: DT.f15, weight: .semibold))
+        HStack(alignment: .top, spacing: DT.s12) {
+            MailAvatar(person: envelope.from, size: 40, isMe: model.isMine(envelope))
+            VStack(alignment: .leading, spacing: 4) {
+                // The top line folds the message again.
+                HStack(spacing: DT.s8) {
+                    Text(model.isMine(envelope) ? "You" : envelope.from.display)
+                        .font(.system(size: DT.f13, weight: .semibold))
                         .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack(alignment: .firstTextBaseline, spacing: DT.s8) {
-                        recipients
-                        Spacer(minLength: 0)
-                        Button(model.showDetails ? "Hide" : "Details") { model.showDetails.toggle() }
-                            .buttonStyle(.plain)
-                            .font(.system(size: DT.f11, weight: .medium))
-                            .foregroundStyle(DT.systemAccent)
+                    if let addr = envelope.from.addr, addr != envelope.from.display {
+                        Text(addr).font(.system(size: DT.f11)).foregroundStyle(.secondary).lineLimit(1)
                     }
-                    if model.showDetails { details }
+                    Spacer(minLength: DT.s8)
+                    Label("\(envelope.mailbox.name) \u{00B7} \(envelope.account.name)", systemImage: "tray")
+                        .font(.system(size: DT.f11)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(MailDates.full.string(from: envelope.date))
+                        .font(.system(size: DT.f11)).foregroundStyle(.secondary)
+                    Image(systemName: "chevron.up")
+                        .font(.system(size: DT.f10, weight: .semibold))
+                        .foregroundStyle(.tertiary)
                 }
+                .contentShape(Rectangle())
+                .onTapGesture { model.toggle(envelope.id) }
+                .help("Fold this message")
+
+                Text(envelope.subject.isEmpty ? "(no subject)" : envelope.subject)
+                    .font(.system(size: DT.f15, weight: .semibold))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .firstTextBaseline, spacing: DT.s8) {
+                    recipients
+                    Spacer(minLength: 0)
+                    Button(model.showDetails ? "Hide" : "Details") { model.showDetails.toggle() }
+                        .buttonStyle(.plain)
+                        .font(.system(size: DT.f11, weight: .medium))
+                        .foregroundStyle(DT.systemAccent)
+                }
+                if model.showDetails { details }
             }
         }
         .padding(.horizontal, DT.s20)

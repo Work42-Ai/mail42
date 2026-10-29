@@ -33,7 +33,8 @@ struct MailListPane: View {
             .padding(.horizontal, DT.s12)
             .frame(height: 34)
             .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(DT.chipFill))
-            .padding(DT.s12)
+            .padding(.horizontal, DT.s12)
+            .frame(height: mailBarHeight)                 // the reader's bar is the same height: one straight line
             .onChange(of: text) { _, _ in push() }
 
             Divider().opacity(0.4)
@@ -94,6 +95,11 @@ private struct MailRows: View {
         .focusEffectDisabled()
         .onKeyPress(.upArrow) { model.moveSelection(by: -1); return .handled }
         .onKeyPress(.downArrow) { model.moveSelection(by: 1); return .handled }
+        .onKeyPress(.escape) {
+            guard model.selectedEnvelope != nil else { return .ignored }
+            model.deselect()
+            return .handled
+        }
         .onKeyPress(.leftArrow) { model.moveInThread(by: -1); return .handled }
         .onKeyPress(.rightArrow) { model.moveInThread(by: 1); return .handled }
         .onKeyPress(keys: [.delete, .deleteForward]) { _ in

@@ -30,7 +30,7 @@ final class MailWidget: Work42Widget, Work42WidgetCustomHeader {
         ]
     }
 
-    @ObservationIgnored let model = MailModel()
+    @ObservationIgnored let model = MailModel.shared
 
     var intents: [WidgetIntentSpec] {
         [
