@@ -23,8 +23,12 @@ struct MailHeader: View {
             // Left of the divider: the search, always.
             MailSearchField(model: model)
                 .padding(.trailing, DT.s12)
-                .frame(width: mailListWidth - mailHeaderInset, alignment: .leading)
-            Divider().opacity(0.5).frame(maxHeight: .infinity)
+                .frame(width: mailListWidth - mailHeaderInset, height: 28, alignment: .leading)
+                // The divider is drawn over the header's height without taking any: a divider that asks for height
+                // makes the whole header as tall as the tile.
+                .overlay(alignment: .trailing) {
+                    Rectangle().fill(Color.primary.opacity(0.1)).frame(width: 1, height: 44)
+                }
             // Right of the divider: Back (an arrow, while a message is open) and the message actions.
             HStack(spacing: DT.s8) {
                 if hasMessage {
@@ -35,7 +39,9 @@ struct MailHeader: View {
                 actions(hasMessage)
             }
             .padding(.leading, DT.s12)
+            .frame(height: 28)
         }
+        .frame(height: 28)
         .lineLimit(1)
         .animation(.easeInOut(duration: 0.2), value: hasMessage)
     }
