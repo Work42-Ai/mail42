@@ -30,15 +30,15 @@ enum MailLoadState: Equatable {
     case failed(String)
 }
 
-/// The body of one message of the open conversation.
-enum MailBodyState: Equatable {
-    case loading
-    /// The sanitised, themed HTML is on disk and reachable at this URL.
-    case ready(URL)
+enum MailReaderState: Equatable {
+    case none
+    case loading(Int64)
+    /// The sanitised HTML is on disk and reachable at `url`; `key` identifies this message's web view.
+    case ready(id: Int64, url: URL, key: String)
     /// The message has no downloaded body.
-    case unavailable
+    case unavailable(Int64)
     case needsAccess
-    case failed(String)
+    case failed(id: Int64, message: String)
 }
 
 /// One message ready to show: its HTML file, its attachments, or the fact that it has no body.
@@ -75,17 +75,14 @@ final class MailModel {
     /// True while a list is being (re)loaded; the previous list stays visible meanwhile.
     private(set) var isRefreshing = false
     private(set) var selectedID: Int64?
+    private(set) var reader: MailReaderState = .none
+    private(set) var attachments: [MailAttachment] = []
     /// Every message of the open conversation (all mailboxes, Sent included), oldest first.
     private(set) var thread: [MailEnvelope] = []
-    /// The messages of the thread that are open (an accordion each); the others show as one line.
-    private(set) var openIDs: Set<Int64> = []
-    /// Each opened message's body, and its attachments.
-    private(set) var bodies: [Int64: MailBodyState] = [:]
-    private(set) var attachmentsByID: [Int64: [MailAttachment]] = [:]
-    /// The message showing every address and the full date, if any.
-    var detailsID: Int64?
-    /// The signed-in Work42 user: their name and photo stand in for "You" and for their own address.
-    private(set) var me: WidgetAccountUser?
+    /// The message of the thread whose body is open; the others show as one line.
+    private(set) var expandedID: Int64?
+    /// Whether the open message shows every address and the full date.
+    var showDetails = false
     /// Set when a `mail42://` link points at a message that is no longer in Mail.
     private(set) var missingMessage = false
     /// A link clicked before the tile was ready; it opens once the list has loaded.
@@ -94,11 +91,13 @@ final class MailModel {
     private(set) var notice: String?
 
     private(set) var services: SessionServices?
+    /// The signed-in Work42 user: their name and photo stand in for "You" and for their own address.
+    private(set) var me: WidgetAccountUser?
 
     private static let pageSize = 50
     private static let searchLimit = 300
     private static let readerArtifactID = "mail42-reader"
-    private static let keptReaders = 40
+    private static let keptReaders = 8
     private static let changeInterval: Duration = .seconds(6)
     private static let accessInterval: Duration = .seconds(2)
 
@@ -107,6 +106,7 @@ final class MailModel {
     private var searchTask: Task<Void, Never>?
     private var noticeTask: Task<Void, Never>?
     private var prefetchTask: Task<Void, Never>?
+    private var readerGeneration = 0
     private var listGeneration = 0
     private var isLoadingMore = false
     private var treeSignature = ""
@@ -141,6 +141,7 @@ final class MailModel {
         searchTask?.cancel(); searchTask = nil
         noticeTask?.cancel(); noticeTask = nil
         prefetchTask?.cancel(); prefetchTask = nil
+        readerGeneration += 1
         dropReaderCache()
         services = nil
     }
@@ -535,10 +536,10 @@ final class MailModel {
         selectedID = nil
         selectedSnapshot = nil
         thread = []
-        openIDs = []
-        bodies = [:]
-        attachmentsByID = [:]
-        detailsID = nil
+        expandedID = nil
+        readerGeneration += 1
+        reader = .none
+        attachments = []
     }
 
     /// Says why an action failed, in one line (the CLI's own words when it has them).
@@ -560,7 +561,8 @@ final class MailModel {
     }
 
     /// Previews an attachment with macOS Quick Look: it is copied to a temporary folder and `qlmanage` shows it.
-    func quickLook(_ attachment: MailAttachment, in id: Int64) async {
+    func quickLook(_ attachment: MailAttachment) async {
+        guard let id = expandedID ?? selectedID else { return }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("mail42-quicklook-\(id)", isDirectory: true)
         do {
             nonisolated struct Saved: Decodable, Sendable { let path: String }
@@ -577,7 +579,8 @@ final class MailModel {
         }
     }
 
-    func saveAttachment(_ attachment: MailAttachment, in id: Int64) async {
+    func saveAttachment(_ attachment: MailAttachment) async {
+        guard let id = expandedID ?? selectedID else { return }
         let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first?.path
             ?? NSHomeDirectory() + "/Downloads"
         do {
@@ -616,12 +619,10 @@ final class MailModel {
 
     /// Opens `id` in the reader and loads its conversation.
     private func beginReading(id: Int64) {
-        openIDs = [id]
-        bodies = [:]
-        attachmentsByID = [:]
-        detailsID = nil
+        expandedID = id
+        showDetails = false
         thread = selectedSnapshot.map { [$0] } ?? []
-        ensureBody(id)
+        showReader(id: id)
         Task { [weak self] in
             guard let loaded = try? await MailCLI.json([MailEnvelope].self, ["message", "thread", String(id)]) else { return }
             guard let self, self.selectedID == id, !loaded.isEmpty else { return }
@@ -629,24 +630,27 @@ final class MailModel {
         }
     }
 
-    /// A message of the conversation was clicked: open it, or fold it again (an accordion).
+    /// A message of the conversation was clicked: open it, or close it again if it is the open one (an accordion).
     func toggle(_ id: Int64) {
-        if openIDs.contains(id) {
-            openIDs.remove(id)
-            if detailsID == id { detailsID = nil }
-        } else {
-            open(id)
-        }
+        if id == expandedID { collapse() } else { expand(id) }
     }
 
-    /// Opens a message of the conversation in place (a row was clicked, or scrolling reached the next one).
-    func open(_ id: Int64) {
-        guard !openIDs.contains(id),
-              let target = thread.first(where: { $0.id == id }) ?? (selectedEnvelope?.id == id ? selectedEnvelope : nil)
-        else { return }
-        openIDs.insert(id)
-        if bodies[id] == nil { ensureBody(id) }
+    /// Opens another message of the conversation (a collapsed row was clicked, or ← →).
+    func expand(_ id: Int64) {
+        guard id != expandedID, let target = thread.first(where: { $0.id == id }) else { return }
+        expandedID = id
+        showDetails = false
+        showReader(id: id)
         if !target.isRead { Task { await setRead(target, true) } }
+    }
+
+    /// Folds the open message back to a line; every message of the conversation is then one row.
+    func collapse() {
+        expandedID = nil
+        showDetails = false
+        readerGeneration += 1
+        reader = .none
+        attachments = []
     }
 
     /// Back to "no message selected" (Esc, or the Back button above the reader).
@@ -655,24 +659,20 @@ final class MailModel {
         clearSelection()
     }
 
-    // MARK: - You
-
-    /// Whether this address is the signed-in user's (Work42 account or the mail account the message sits in).
-    func isMyAddress(_ address: String?, in envelope: MailEnvelope) -> Bool {
-        guard let address = address?.lowercased(), !address.isEmpty else { return false }
-        return address == me?.email?.lowercased() || address == envelope.account.email?.lowercased()
+    func moveInThread(by step: Int) {
+        guard !thread.isEmpty else { return }
+        guard let current = thread.firstIndex(where: { $0.id == expandedID }) else {
+            expand(step > 0 ? thread[0].id : thread[thread.count - 1].id)      // all folded: open the first (or last)
+            return
+        }
+        let target = current + step
+        if thread.indices.contains(target) { expand(thread[target].id) }
     }
 
-    /// The name shown for a person: the user's Work42 name for their own address, else the mail's own.
-    func name(of person: MailPerson, in envelope: MailEnvelope) -> String {
-        if isMyAddress(person.addr, in: envelope), let mine = me?.displayName, !mine.isEmpty { return mine }
-        return person.display
-    }
-
-    /// The name shown for the sender of a message ("You" only if Work42 doesn't know the user's name).
-    func senderName(_ envelope: MailEnvelope) -> String {
-        if isMine(envelope) { return me?.displayName.flatMap { $0.isEmpty ? nil : $0 } ?? "You" }
-        return envelope.from.display
+    /// The message whose body is open (it may be an earlier one of the conversation); nil when all are folded.
+    var expandedEnvelope: MailEnvelope? {
+        guard let expandedID else { return nil }
+        return thread.first { $0.id == expandedID } ?? (selectedEnvelope?.id == expandedID ? selectedEnvelope : nil)
     }
 
     /// How many unread messages the current view holds, for the empty state's one-line summary.
@@ -695,6 +695,24 @@ final class MailModel {
         if envelope.mailbox.role == "sent" { return true }
         guard let mine = envelope.account.email?.lowercased(), let from = envelope.from.addr?.lowercased() else { return false }
         return mine == from
+    }
+
+    /// Whether this address is the signed-in user's (Work42 account or the mail account the message sits in).
+    func isMyAddress(_ address: String?, in envelope: MailEnvelope) -> Bool {
+        guard let address = address?.lowercased(), !address.isEmpty else { return false }
+        return address == me?.email?.lowercased() || address == envelope.account.email?.lowercased()
+    }
+
+    /// The name shown for a person: the user's Work42 name for their own address, else the mail's own.
+    func name(of person: MailPerson, in envelope: MailEnvelope) -> String {
+        if isMyAddress(person.addr, in: envelope), let mine = me?.displayName, !mine.isEmpty { return mine }
+        return person.display
+    }
+
+    /// The name shown for the sender of a message ("You" only if Work42 doesn't know the user's name).
+    func senderName(_ envelope: MailEnvelope) -> String {
+        if isMine(envelope) { return me?.displayName.flatMap { $0.isEmpty ? nil : $0 } ?? "You" }
+        return envelope.from.display
     }
 
     // MARK: - mail42:// links
@@ -734,51 +752,51 @@ final class MailModel {
         select(envelopes[target].id)
     }
 
-    /// Loads a message's body again (the "Try again" button).
-    func retryBody(_ id: Int64) {
+    func retryReader() {
+        guard let id = selectedID else { return }
         evict(id)
-        bodies[id] = nil
-        ensureBody(id)
+        showReader(id: id)
     }
 
-    /// Makes sure the body of `id` is being prepared (or is ready): `bodies[id]` says where it is.
-    private func ensureBody(_ id: Int64) {
-        let conversation = selectedID
-        if conversation == id { prefetchTask?.cancel() }
+    private func showReader(id: Int64) {
+        readerGeneration += 1
+        let generation = readerGeneration
+        prefetchTask?.cancel()
         if let entry = readerCache[id] {
             if entry.theme == CanvasTheme.tokensCSS().hashValue {   // already written in this theme: show it at once
-                apply(entry, id: id)
+                present(entry, id: id)
                 touch(id)
-                if conversation == id { prefetchNeighbors(of: id) }
+                prefetchNeighbors(of: id)
                 return
             }
             evict(id)                                               // the theme changed since: write it again
         }
-        bodies[id] = .loading
+        reader = .loading(id)
+        attachments = []
         Task { [weak self] in
             guard let self else { return }
             do {
                 let entry = try await self.prepare(id: id)
-                guard self.selectedID == conversation else { return }       // another conversation was picked meanwhile
+                guard generation == self.readerGeneration else { return }   // another message was picked meanwhile
                 self.store(entry, id: id)
-                self.apply(entry, id: id)
-                if conversation == id { self.prefetchNeighbors(of: id) }
+                self.present(entry, id: id)
+                self.prefetchNeighbors(of: id)
             } catch let failure as MailFailure {
-                guard self.selectedID == conversation else { return }
-                self.bodies[id] = failure.code == "fda_denied" ? .needsAccess : .failed(failure.message)
+                guard generation == self.readerGeneration else { return }
+                self.reader = failure.code == "fda_denied" ? .needsAccess : .failed(id: id, message: failure.message)
             } catch {
-                guard self.selectedID == conversation else { return }
-                self.bodies[id] = .failed(error.localizedDescription)
+                guard generation == self.readerGeneration else { return }
+                self.reader = .failed(id: id, message: error.localizedDescription)
             }
         }
     }
 
-    private func apply(_ entry: ReaderEntry, id: Int64) {
-        attachmentsByID[id] = entry.attachments
+    private func present(_ entry: ReaderEntry, id: Int64) {
+        attachments = entry.attachments
         if entry.unavailable {
-            bodies[id] = .unavailable
+            reader = .unavailable(id)
         } else if let url = entry.url {
-            bodies[id] = .ready(url)
+            reader = .ready(id: id, url: url, key: entry.key)
         }
     }
 

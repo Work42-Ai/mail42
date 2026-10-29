@@ -68,6 +68,8 @@ private struct MailRows: View {
         .focusEffectDisabled()
         .onKeyPress(.upArrow) { model.moveSelection(by: -1); return .handled }
         .onKeyPress(.downArrow) { model.moveSelection(by: 1); return .handled }
+        .onKeyPress(.leftArrow) { model.moveInThread(by: -1); return .handled }
+        .onKeyPress(.rightArrow) { model.moveInThread(by: 1); return .handled }
         .onKeyPress(.escape) {
             guard model.selectedEnvelope != nil else { return .ignored }
             model.deselect()

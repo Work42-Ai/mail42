@@ -29,9 +29,9 @@ Nothing here ever sends.
   date:2w..`; plain words search subject, sender name and address, recipients and Apple's preview line (headers only,
   `--headers`: complete and instant, never the full message text), always within the view you are in. A query that
   isn't valid syntax is searched as literal words.
-- **Reader:** the conversation is one page that scrolls, every message an accordion; reaching the bottom of the last
-  open message opens the next one in order. The user's own messages and address show their Work42 name and photo
-  instead of "You". Each message has an avatar (the same colours as Meet42 for the same person), sender, `mailbox · account`, date, subject,
+- **Reader:** the conversation is a stack of messages, one open at a time (click a line to open it, click the open
+  one's top line to fold it; ← → step through it). Highlight text to comment on it. The user's own messages and
+  address show their Work42 name and photo instead of "You". Each message has an avatar (the same colours as Meet42 for the same person), sender, `mailbox · account`, date, subject,
   To/Cc and a **Details** toggle; attachment cards (Quick Look, Save to Downloads); the message in Work42's theme
   (ordinary mail takes the app's font, colours and accent; designed mail, such as newsletters, stays as designed on a
   light card), earlier quoted text folded behind "Show quoted text". Links open through Work42's Open Link.

@@ -1,17 +1,18 @@
-// MailReader.swift — the right-hand pane: a conversation read as ONE page that scrolls. Every message is an accordion
-// section (click its line to open it, click its top line again to fold it); scrolling to the bottom of the last open
-// message opens the next one in order, so a long thread reads straight through. With nothing selected, a quiet empty
-// state. (Back and search live in the tile's header, so there is a single bar.)
+// MailReader.swift — the right-hand pane: a bar (aligned with the search field on the left), then a conversation as a
+// stack of messages that open and close like an accordion (click a message to read it, click it again to fold it),
+// or, with nothing selected, a quiet empty state.
 //
-// Each body is the sanitised HTML `mail42 message read --html --out` wrote, put in Work42's theme (MailBodyTheme) and
-// shown by `MailInlineWebView`, a web view as tall as its content, so the bodies scroll with the page.
+// The body is the sanitised HTML `mail42 message read --html --out` wrote, put in Work42's theme (MailBodyTheme) and
+// shown by the SDK's BrowserSurface with its chrome hidden. The surface owns highlight-to-comment; the resolver below
+// only labels the comment so an agent can find the message again.
 
 import AppKit
 import SwiftUI
 import Work42PluginKit
 import Work42UI
 
-/// Kept for the aligned bars of the setup states; the tile has one header now.
+/// The height of the bar above the list (the search field) and above the reader. They are the same, so the line
+/// under them is one straight line across the tile.
 let mailBarHeight: CGFloat = 58
 
 struct MailReaderPane: View {
@@ -19,6 +20,7 @@ struct MailReaderPane: View {
     let services: SessionServices
 
     var body: some View {
+        // Back and search live in the tile's header, so the reader has no bar of its own.
         Group {
             if model.missingMessage {
                 MailPlaceholder(
@@ -61,6 +63,7 @@ private struct MailEmptyReader: View {
                 .multilineTextAlignment(.center)
             HStack(spacing: DT.s12) {
                 hint("\u{2191} \u{2193}", "move")
+                hint("\u{21A9}", "open")
                 hint("\u{2318}N", "new message")
                 hint("\u{238B}", "back")
             }
@@ -91,94 +94,53 @@ private struct MailEmptyReader: View {
 
 // MARK: - The conversation
 
-/// Where the page is scrolled to, as far as "has it reached the bottom" is concerned.
-private struct MailScrollEdge: Equatable {
-    let nearBottom: Bool
-    /// The page height in steps, so growth (a body measured, a message opened) is noticed too.
-    let steps: Int
-}
-
-/// Every message of the conversation, oldest first, in one scroll view.
+/// Every message of the conversation as a row; the open one shows its header and body in place.
 private struct MailThread: View {
     let model: MailModel
     let services: SessionServices
-    @State private var nearBottom = false
-    @State private var lastOpened = Date.distantPast
-
-    private var messages: [MailEnvelope] {
-        model.thread.isEmpty ? (model.selectedEnvelope.map { [$0] } ?? []) : model.thread
-    }
 
     var body: some View {
-        ScrollViewReader { proxy in
+        let messages = model.thread.isEmpty ? (model.selectedEnvelope.map { [$0] } ?? []) : model.thread
+        let openIndex = messages.firstIndex { $0.id == model.expandedID }
+
+        if let openIndex {
+            VStack(spacing: 0) {
+                if openIndex > 0 { folded(Array(messages[..<openIndex])) }
+                MailOpenMessage(model: model, services: services, envelope: messages[openIndex])
+                    .frame(maxHeight: .infinity)
+                    .id(messages[openIndex].id)
+                    .transition(.opacity)
+                if openIndex < messages.count - 1 { folded(Array(messages[(openIndex + 1)...])) }
+            }
+            .animation(.easeInOut(duration: 0.22), value: model.expandedID)
+        } else {
+            // Everything folded: the whole conversation as rows.
             ScrollView {
                 VStack(spacing: 0) {
                     ForEach(messages) { message in
-                        MailThreadSection(model: model, services: services, envelope: message)
-                            .id(message.id)
+                        MailCollapsedRow(model: model, envelope: message)
                         Divider().opacity(0.3)
                     }
                 }
-                .animation(.easeInOut(duration: 0.25), value: model.openIDs)
             }
-            .onScrollGeometryChange(for: MailScrollEdge.self) { geometry in
-                let bottom = geometry.contentOffset.y + geometry.containerSize.height
-                return MailScrollEdge(
-                    nearBottom: geometry.contentSize.height - bottom < 140,
-                    steps: Int(geometry.contentSize.height / 24))
-            } action: { _, edge in
-                nearBottom = edge.nearBottom
-                openNextIfReached()
-            }
-            .onChange(of: model.thread.count) { _, _ in
-                // The whole conversation arrived: show the message that was picked at the top, the earlier ones above it.
-                guard let id = model.selectedID else { return }
-                Task {
-                    try? await Task.sleep(for: .milliseconds(80))
-                    withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .top) }
+        }
+    }
+
+    /// Folded messages above or below the open one; they scroll when there are many, so the open one keeps its room.
+    private func folded(_ messages: [MailEnvelope]) -> some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                ForEach(messages) { message in
+                    VStack(spacing: 0) {
+                        MailCollapsedRow(model: model, envelope: message)
+                        Divider().opacity(0.3)
+                    }
+                    .transition(.opacity)
                 }
             }
         }
-    }
-
-    /// Reached the bottom of the last open message: open the next one, in order.
-    private func openNextIfReached() {
-        guard nearBottom,
-              let last = messages.lastIndex(where: { model.openIDs.contains($0.id) }),
-              last + 1 < messages.count
-        else { return }
-        if (model.bodies[messages[last].id] ?? .loading) == .loading { return }    // still arriving: wait for it
-        let wait = 0.7 - Date().timeIntervalSince(lastOpened)
-        if wait > 0 {
-            Task {
-                try? await Task.sleep(for: .seconds(wait))
-                openNextIfReached()
-            }
-            return
-        }
-        lastOpened = Date()
-        withAnimation(.easeInOut(duration: 0.25)) { model.open(messages[last + 1].id) }
-    }
-}
-
-/// One message: a line when folded, its header, attachments and body when open.
-private struct MailThreadSection: View {
-    let model: MailModel
-    let services: SessionServices
-    let envelope: MailEnvelope
-
-    var body: some View {
-        VStack(spacing: 0) {
-            if model.openIDs.contains(envelope.id) {
-                MailMessageHeader(model: model, envelope: envelope)
-                    .transition(.opacity)
-                MailMessageContent(model: model, services: services, envelope: envelope)
-                    .transition(.opacity)
-            } else {
-                MailCollapsedRow(model: model, envelope: envelope)
-                    .transition(.opacity)
-            }
-        }
+        .frame(maxHeight: 136)
+        .fixedSize(horizontal: false, vertical: messages.count <= 3)
     }
 }
 
@@ -188,7 +150,7 @@ private struct MailCollapsedRow: View {
     let envelope: MailEnvelope
 
     var body: some View {
-        Button { withAnimation(.easeInOut(duration: 0.25)) { model.toggle(envelope.id) } } label: {
+        Button { model.toggle(envelope.id) } label: {
             HStack(spacing: 10) {
                 Image(systemName: "chevron.right")
                     .font(.system(size: DT.f10, weight: .semibold))
@@ -202,6 +164,13 @@ private struct MailCollapsedRow: View {
                 Text(model.senderName(envelope))
                     .font(.system(size: DT.f12, weight: .medium))
                     .lineLimit(1)
+                if model.isMine(envelope) {
+                    Text("Sent")
+                        .font(.system(size: DT.f9, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Capsule().fill(DT.chipFill))
+                }
                 Text(envelope.snippet ?? envelope.subject)
                     .font(.system(size: DT.f11))
                     .foregroundStyle(.secondary)
@@ -219,6 +188,23 @@ private struct MailCollapsedRow: View {
 
 // MARK: - The open message
 
+private struct MailOpenMessage: View {
+    let model: MailModel
+    let services: SessionServices
+    let envelope: MailEnvelope
+
+    var body: some View {
+        VStack(spacing: 0) {
+            MailMessageHeader(model: model, envelope: envelope)
+            if !model.attachments.isEmpty {
+                MailAttachmentCards(model: model, attachments: model.attachments)
+            }
+            Divider().opacity(0.4)
+            MailBodyView(model: model, services: services)
+        }
+    }
+}
+
 private struct MailMessageHeader: View {
     let model: MailModel
     let envelope: MailEnvelope
@@ -232,7 +218,7 @@ private struct MailMessageHeader: View {
                     Text(model.senderName(envelope))
                         .font(.system(size: DT.f13, weight: .semibold))
                         .textSelection(.enabled)
-                    if !model.isMine(envelope), let addr = envelope.from.addr, addr != envelope.from.display {
+                    if let addr = envelope.from.addr, addr != envelope.from.display {
                         Text(addr).font(.system(size: DT.f11)).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer(minLength: DT.s8)
@@ -245,7 +231,7 @@ private struct MailMessageHeader: View {
                         .foregroundStyle(.tertiary)
                 }
                 .contentShape(Rectangle())
-                .onTapGesture { withAnimation(.easeInOut(duration: 0.25)) { model.toggle(envelope.id) } }
+                .onTapGesture { model.toggle(envelope.id) }
                 .help("Fold this message")
 
                 Text(envelope.subject.isEmpty ? "(no subject)" : envelope.subject)
@@ -255,21 +241,19 @@ private struct MailMessageHeader: View {
                 HStack(alignment: .firstTextBaseline, spacing: DT.s8) {
                     recipients
                     Spacer(minLength: 0)
-                    Button(model.detailsID == envelope.id ? "Hide" : "Details") {
-                        model.detailsID = model.detailsID == envelope.id ? nil : envelope.id
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: DT.f11, weight: .medium))
-                    .foregroundStyle(DT.systemAccent)
+                    Button(model.showDetails ? "Hide" : "Details") { model.showDetails.toggle() }
+                        .buttonStyle(.plain)
+                        .font(.system(size: DT.f11, weight: .medium))
+                        .foregroundStyle(DT.systemAccent)
                 }
-                if model.detailsID == envelope.id { details }
+                if model.showDetails { details }
             }
         }
         .padding(.horizontal, DT.s20)
         .padding(.vertical, DT.s12)
     }
 
-    /// `To: Danny, Cc: Anthony, Trev` on one line; the user's own address shows as their Work42 name.
+    /// `To: Danny, Cc: Anthony, Trev` on one line.
     private var recipients: some View {
         var parts: [String] = []
         if !envelope.to.isEmpty { parts.append("To: " + envelope.to.map { model.name(of: $0, in: envelope) }.joined(separator: ", ")) }
@@ -300,72 +284,17 @@ private struct MailMessageHeader: View {
     }
 }
 
-/// An open message's attachments and body.
-private struct MailMessageContent: View {
-    let model: MailModel
-    let services: SessionServices
-    let envelope: MailEnvelope
-
-    var body: some View {
-        VStack(spacing: 0) {
-            if let attachments = model.attachmentsByID[envelope.id], !attachments.isEmpty {
-                MailAttachmentCards(model: model, messageID: envelope.id, attachments: attachments)
-            }
-            Divider().opacity(0.4)
-            switch model.bodies[envelope.id] ?? .loading {
-            case .loading:
-                ProgressView().controlSize(.small).frame(maxWidth: .infinity).padding(.vertical, DT.s20)
-            case .ready(let url):
-                MailInlineBody(url: url, onSelection: { text in comment(on: text) })
-            case .unavailable:
-                note("This message isn\u{2019}t downloaded", "Apple Mail hasn\u{2019}t fetched its body yet. Open it in Mail to download it.")
-            case .needsAccess:
-                note("mail42 can\u{2019}t read this message", "Full Disk Access isn\u{2019}t granted to mail42.")
-            case .failed(let message):
-                VStack(spacing: DT.s8) {
-                    note("Couldn\u{2019}t open the message", message)
-                    Button("Try again") { model.retryBody(envelope.id) }.glassPlainCapsule()
-                }
-            }
-        }
-    }
-
-    private func note(_ title: String, _ text: String) -> some View {
-        VStack(spacing: 4) {
-            Text(title).font(.system(size: DT.f12, weight: .semibold))
-            Text(text).font(.system(size: DT.f11)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-        }
-        .padding(DT.s20)
-        .frame(maxWidth: .infinity)
-    }
-
-    /// Highlighted text becomes a commentable selection (dictate a comment, and it lands in the composer), labelled
-    /// with the message so an agent can find it again.
-    private func comment(on text: String) {
-        let composer = services.composer
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            Task { try? await composer.clearCommentableSelection() }
-            return
-        }
-        let subject = envelope.subject.isEmpty ? "(no subject)" : envelope.subject
-        let link = envelope.link ?? "mail42://message/\(envelope.id)"
-        let label = "Mail42 \u{00B7} \(subject) \u{00B7} \(envelope.from.display) (\(link))"
-        Task { try? await composer.presentCommentableSelection(sourceLabel: label, excerpt: text) }
-    }
-}
-
 // MARK: - Attachments
 
 private struct MailAttachmentCards: View {
     let model: MailModel
-    let messageID: Int64
     let attachments: [MailAttachment]
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: DT.s8) {
                 ForEach(attachments) { attachment in
-                    MailAttachmentCard(model: model, messageID: messageID, attachment: attachment)
+                    MailAttachmentCard(model: model, attachment: attachment)
                 }
             }
             .padding(.horizontal, DT.s20)
@@ -376,7 +305,6 @@ private struct MailAttachmentCards: View {
 
 private struct MailAttachmentCard: View {
     let model: MailModel
-    let messageID: Int64
     let attachment: MailAttachment
 
     var body: some View {
@@ -391,10 +319,8 @@ private struct MailAttachmentCard: View {
                     .lineLimit(1)
                 Text(detail).font(.system(size: DT.f11)).foregroundStyle(.secondary).lineLimit(1)
             }
-            MailIconButton(symbol: "eye", help: "Quick Look") { Task { await model.quickLook(attachment, in: messageID) } }
-            MailIconButton(symbol: "arrow.down.circle", help: "Save to Downloads") {
-                Task { await model.saveAttachment(attachment, in: messageID) }
-            }
+            MailIconButton(symbol: "eye", help: "Quick Look") { Task { await model.quickLook(attachment) } }
+            MailIconButton(symbol: "arrow.down.circle", help: "Save to Downloads") { Task { await model.saveAttachment(attachment) } }
         }
         .padding(.leading, 12)
         .padding(.trailing, 6)
@@ -433,6 +359,61 @@ private struct MailAttachmentCard: View {
         case "ics": return ("calendar", .red)
         default: return ("doc.fill", .secondary)
         }
+    }
+}
+
+// MARK: - The message
+
+private struct MailBodyView: View {
+    let model: MailModel
+    let services: SessionServices
+
+    var body: some View {
+        switch model.reader {
+        case .none:
+            Color.clear
+        case .loading:
+            ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .ready(let id, let url, let key):
+            MailWebBody(model: model, services: services, id: id, url: url, key: key)
+        case .unavailable:
+            MailPlaceholder(
+                symbol: "arrow.down.circle", title: "This message isn\u{2019}t downloaded",
+                text: "Apple Mail hasn\u{2019}t fetched its body yet. Open it in Mail to download it.")
+        case .needsAccess:
+            MailPlaceholder(
+                symbol: "lock.shield", title: "mail42 can\u{2019}t read this message",
+                text: "Full Disk Access isn\u{2019}t granted to mail42.")
+        case .failed(_, let message):
+            VStack(spacing: DT.s8) {
+                MailPlaceholder(symbol: "exclamationmark.triangle", title: "Couldn\u{2019}t open the message", text: message)
+                Button("Try again") { model.retryReader() }.glassPlainCapsule()
+            }
+        }
+    }
+}
+
+private struct MailWebBody: View {
+    let model: MailModel
+    let services: SessionServices
+    let id: Int64
+    let url: URL
+    let key: String
+
+    var body: some View {
+        BrowserSurface(
+            spec: BrowserSurfaceSpec(url: url, dataStoreKey: "mail42-reader", title: "Mail42", icon: "envelope"),
+            cacheKey: key,
+            services: services,
+            selectionResolver: { [weak model] _ in
+                guard let envelope = model?.expandedEnvelope else { return nil }
+                let subject = envelope.subject.isEmpty ? "(no subject)" : envelope.subject
+                let link = envelope.link ?? "mail42://message/\(envelope.id)"
+                return ResolvedAnnotation(sourceLabel: "Mail42 \u{00B7} \(subject) \u{00B7} \(envelope.from.display) (\(link))")
+            }
+        )
+        .browserChromeHostOwned(true)
+        .id(key)
     }
 }
 
