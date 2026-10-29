@@ -15,12 +15,22 @@ struct MailHeader: View {
     var body: some View {
         let hasMessage = model.selectedEnvelope != nil
         HStack(spacing: DT.s8) {
-            Text(model.title)
-                .font(.system(size: DT.f13, weight: .semibold))
-                .foregroundStyle(.primary)
-            Text(model.detail)
-                .font(.system(size: DT.f11))
-                .foregroundStyle(.secondary)
+            if hasMessage {
+                Button { model.deselect() } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left").font(.system(size: DT.f11, weight: .semibold))
+                        Text("Back").font(.system(size: DT.f12, weight: .medium))
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(Capsule().fill(DT.chipFill))
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Back to the list  \u{238B}")
+                .transition(.opacity)
+            }
+            MailSearchField(model: model)
             Spacer(minLength: DT.s8)
             HStack(spacing: 2) {
                 MailIconButton(symbol: "arrowshape.turn.up.left", help: "Reply  \u{2318}R", enabled: hasMessage) { act(.reply) }
@@ -43,9 +53,42 @@ struct MailHeader: View {
             }
         }
         .lineLimit(1)
+        .animation(.easeInOut(duration: 0.2), value: hasMessage)
     }
 
     private func act(_ action: MailModel.MailAction) { Task { await model.perform(action) } }
+}
+
+/// "Search INBOX by name, email or subject": searches the view you are in, headers only (see `MailModel.search`).
+struct MailSearchField: View {
+    let model: MailModel
+
+    var body: some View {
+        let text = Binding<String>(
+            get: { model.query },
+            set: { value in
+                guard model.query != value else { return }
+                model.query = value
+                model.filtersChanged()
+            })
+        HStack(spacing: DT.s8) {
+            Image(systemName: "magnifyingglass").font(.system(size: DT.f12)).foregroundStyle(.secondary)
+            TextField("Search \(model.title) by name, email or subject", text: text)
+                .textFieldStyle(.plain)
+                .font(.system(size: DT.f12))
+            if model.isRefreshing && !model.query.isEmpty { ProgressView().controlSize(.mini) }
+            if !model.query.isEmpty {
+                Button { text.wrappedValue = "" } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, DT.s12)
+        .frame(height: 28)
+        .frame(maxWidth: 380)
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(DT.chipFill))
+    }
 }
 
 /// A small icon button with a hover highlight, disabled when there is no message to act on.

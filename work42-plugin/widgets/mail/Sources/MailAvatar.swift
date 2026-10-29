@@ -6,6 +6,7 @@
 // the same colour in a guest list, a transcript and a mail.
 
 import SwiftUI
+import Work42PluginKit
 import Work42UI
 
 enum MailAvatarStyle {
@@ -50,12 +51,16 @@ struct MailAvatar: View {
     var size: CGFloat = 28
     /// The user's own message: drawn in Meet42's "You" colour.
     var isMe = false
+    /// The user's Work42 name and photo, for their own messages.
+    var mine: WidgetAccountUser?
 
     var body: some View {
         let key = MailAvatarStyle.key(name: person.name, email: person.addr)
+        let name = isMe ? (mine?.displayName ?? person.name) : person.name
         GlassAvatar(
-            initials: MailAvatarStyle.initials(name: person.name, email: person.addr),
+            initials: MailAvatarStyle.initials(name: name, email: isMe ? (mine?.email ?? person.addr) : person.addr),
             color: isMe ? MailAvatarStyle.me : MailAvatarStyle.palette[MailAvatarStyle.paletteIndex(for: key)],
-            size: size)
+            size: size,
+            imageURL: isMe ? mine?.photoURL : nil)
     }
 }

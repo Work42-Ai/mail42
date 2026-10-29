@@ -9,36 +9,9 @@ import Work42UI
 
 struct MailListPane: View {
     let model: MailModel
-    @State private var text = ""
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: DT.s8) {
-                Image(systemName: "magnifyingglass").font(.system(size: DT.f12)).foregroundStyle(.secondary)
-                TextField("Search name, email or subject", text: $text)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: DT.f13))
-                    .onSubmit { push() }
-                if model.isRefreshing { ProgressView().controlSize(.mini) }
-                if !text.isEmpty {
-                    Button {
-                        text = ""
-                        push()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, DT.s12)
-            .frame(height: 34)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(DT.chipFill))
-            .padding(.horizontal, DT.s12)
-            .frame(height: mailBarHeight)                 // the reader's bar is the same height: one straight line
-            .onChange(of: text) { _, _ in push() }
-
-            Divider().opacity(0.4)
-
             Group {
                 if model.envelopes.isEmpty, model.isRefreshing {
                     MailSkeletonRows().transition(.opacity)
@@ -55,12 +28,6 @@ struct MailListPane: View {
             .animation(.easeInOut(duration: 0.22), value: model.envelopes.isEmpty)
             .animation(.easeInOut(duration: 0.22), value: model.isRefreshing)
         }
-    }
-
-    private func push() {
-        guard model.query != text else { return }
-        model.query = text
-        model.filtersChanged()
     }
 }
 
@@ -106,8 +73,6 @@ private struct MailRows: View {
             model.deselect()
             return .handled
         }
-        .onKeyPress(.leftArrow) { model.moveInThread(by: -1); return .handled }
-        .onKeyPress(.rightArrow) { model.moveInThread(by: 1); return .handled }
         .onKeyPress(keys: [.delete, .deleteForward]) { _ in
             guard model.selectedEnvelope != nil else { return .ignored }
             Task { await model.perform(.delete) }
