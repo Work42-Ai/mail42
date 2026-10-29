@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  mail42.entitlements — signed into the release binary (scripts/build-mail42.sh, scripts/release.sh).
+
+  The release is built with the Hardened Runtime (notarization requires it). Full Disk Access, which mail42 needs
+  to read Apple Mail's files, is a user grant in System Settings, not an entitlement. The one entitlement is
+  Apple Events: with the Hardened Runtime, a process may only send Apple Events to another app when it carries
+  it, and mail42 asks Mail (mark, move, archive, delete, junk, drafts). macOS still asks the user once whether
+  mail42 may control Mail (Privacy & Security › Automation). No sandbox.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>

@@ -1,0 +1,13 @@
+manifest_version: 2
+name: mail42
+version: 0.1.0
+description: >
+  Read-only local email for you and your agents. Provides the Mail widget (a lightweight reader over every Apple
+  Mail account, with highlight-to-comment and a background sync) on top of the standalone `mail42` tool
+  (github.com/Work42-Ai/mail42), which holds the Full Disk Access grant and the local index. This plugin is UI and
+  orchestration: it only ever runs the `mail42` CLI, never reads Apple Mail itself, and never writes mail.
+author: work42
+sdk_version: 2.10.0
+sdk_abi: 14
+requires: []
+global_skills: mail42-setup, mail42-cli

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  mail42-Info.plist — the Info.plist of mail42.app (scripts/build-mail42.sh), and also embedded into the
+  binary's __TEXT,__info_plist section so a bare `swift build` binary carries the same identity.
+  mail42 ships as a small signed app bundle (no Dock icon, no window) because macOS lists an app bundle, not a
+  bare command-line binary, under Full Disk Access. Full Disk Access has no usage-description string: the user
+  turns it on in System Settings → Privacy & Security.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.work42.mail42</string>
+    <key>CFBundleName</key>
+    <string>mail42</string>
+    <key>CFBundleDisplayName</key>
+    <string>mail42</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>15.0</string>
+    <key>CFBundleExecutable</key>
+    <string>mail42</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>mail42 asks Mail to mark, move and draft messages when you or your agent ask it to. It never sends mail.</string>
+</dict>
+</plist>
