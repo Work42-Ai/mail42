@@ -2,15 +2,15 @@
 name: mail42-setup
 description: |
   Install and set up the mail42 command-line tool: download the signed release, install it as ~/.work42/mail42.app with the command linked into ~/.work42/bin, verify it,
-  guide the user through Full Disk Access and run the first sync. Use it whenever `command -v mail42` prints nothing, a
+  guide the user through Full Disk Access (and, on first use, Automation). Use it whenever `command -v mail42` prints nothing, a
   mail42 command fails because the tool is missing, too old or not allowed to read Mail (`fda_denied`), or the user asks to set up or update mail42.
 ---
 
 # mail42-setup — install and set up mail42
 
 mail42 is a separate, signed and notarized command-line tool (github.com/Work42-Ai/mail42), not part of the
-Work42 app. This plugin's Mail widget and skills call it. It only **reads** Apple Mail's local store; it never sends,
-moves or changes mail. **Always ask the user first.** Before installing or updating anything, tell them what you are about
+Work42 app. This plugin's Mail42 tile and skills call it. It reads Apple Mail's own files live (it keeps no copy of
+the user's mail) and, when asked, has Apple Mail itself mark, move or draft messages; it never sends mail. **Always ask the user first.** Before installing or updating anything, tell them what you are about
 to do (download the signed mail42 app from github.com/Work42-Ai/mail42 into `~/.work42` and link it into `~/.work42/bin`) and wait
 for a yes. If they decline, stop and carry on without mail42; do not install it later on your own. Then follow these steps
 in order and stop at the first one that fails; say what failed instead of working around it.
@@ -47,29 +47,31 @@ in order and stop at the first one that fails; say what failed instead of workin
    mail42 --version
    ```
 
-   The app is what macOS lists as "mail42" in System Settings → Privacy & Security. Updating keeps the index
-   (`~/.work42/mail42/mail.db`) and the Full Disk Access grant.
+   The app is what macOS lists as "mail42" in System Settings → Privacy & Security. Updating keeps the Full Disk
+   Access and Automation grants (mail42 has nothing else to keep: no database, no copy of mail).
 
-## 2. Full Disk Access
+## 2. Full Disk Access (to read mail)
 
 Apple Mail keeps its messages in a protected folder, so macOS must be told mail42 may read it. There is no prompt
-macOS can show for this; the user switches it on by hand.
+macOS can show for this; the user switches it on by hand. The **Mail42** tile walks them through the same steps and
+notices by itself when it is done.
 
 1. `mail42 permissions` exits 0 when granted. If it does, go to step 3.
 2. Otherwise run `mail42 permissions open` (opens System Settings → Privacy & Security → Full Disk Access) and tell the
-   user to add **mail42** (the `+` button, then `~/.work42/mail42.app`) and switch it on. They may be asked to quit
-   and reopen mail42; the next command does that by itself.
-3. Open the **Mail** widget for the user with `widget_open` (kind `widget:mail`) so its "Allow mail42 to read Mail"
-   state can show **Open Settings** and **Check again**. Re-run `mail42 permissions` until it exits 0.
+   user to add **mail42** (the `+` button, then `~/.work42/mail42.app`) and switch it on.
+3. Open the **Mail42** tile for the user with `widget_open` (kind `widget:mail`): until access is granted it shows the
+   three steps, and it carries on to the inbox by itself. Re-run `mail42 permissions` until it exits 0.
 
-## 3. Load the mail
+## 3. Automation (to act on mail), the first time
 
-Run `mail42 sync` once. It copies the last 90 days (`mail42 config set window_days N` changes that; 0 = all) of
-every Apple Mail account into the local index. A large mailbox can take a few minutes the first time; later syncs
-are quick and the Mail widget keeps them going while Work42 runs. If it fails with `no_mail_data`, Apple Mail has no
-accounts yet: ask the user to add one in Mail.
+The first time anyone marks, moves, archives, deletes or drafts a message, macOS asks whether **mail42** may control
+**Mail**. The user answers **Allow** (the dialog can sit behind other windows: tell them to look for it).
+`mail42 permissions automation` triggers and waits for that question (up to two minutes) and prints `granted` when it
+is answered; `--check` only reports `granted`, `denied` or `not_determined`. If it says `denied`, the user can turn it on
+under System Settings → Privacy & Security → Automation → mail42 → Mail. Reading mail never needs this.
 
 ## Done
 
-Tell the user what is installed (`mail42 --version`), whether Full Disk Access is granted, and how many messages
-the first sync indexed. Point them at the `mail42-cli` skill for how to read their mail.
+Tell the user what is installed (`mail42 --version`), whether Full Disk Access (and, if they use it, Automation) is
+granted, and that mail42 never sends mail: replies open as drafts in Mail. Point them at the `mail42-cli` skill for
+how to read and act on their mail. If `mailbox list` is empty, Apple Mail has no accounts yet: ask them to add one.

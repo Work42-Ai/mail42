@@ -43,5 +43,10 @@ SOFTWARE.
   `message` / `attachment` command layout and `--json` convention.
 - **notmuch** (https://notmuchmail.org, GPL-3.0): the search-term design (`from:`, `is:unread`,
   `date:2w..`). Only the syntax idea is used; no notmuch code is included.
-- **sinkingsugar/mail-mcp** (https://github.com/sinkingsugar/mail-mcp, MIT): reference for the FTS5 indexing and
-  HTML-to-text approach.
+- **sinkingsugar/mail-mcp** (https://github.com/sinkingsugar/mail-mcp, MIT): reference for the HTML-to-text
+  approach. (mail42 keeps no search index: it reads the text of the matching messages' files.)
+- **che-apple-mail-mcp** (see above): also the reference for acting on mail through Mail.app itself: AppleScript
+  for read state, flags, moves and junk, and Mail's own compose window for replies and drafts. The scripts in
+  `Sources/Mail42Actions/` are written for mail42 and share no code with it.
+- **meet42** (https://github.com/Work42-Ai/meet42, same authors): `Sources/…/MailAvatar.swift` in the Mail42 widget
+  copies meet42's avatar palette, colour hash and initials rule so a person looks the same in both.
