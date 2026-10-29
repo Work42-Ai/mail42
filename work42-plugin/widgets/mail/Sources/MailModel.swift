@@ -264,7 +264,7 @@ final class MailModel {
                 [MailEnvelope].self, ["envelope", "search", combined, "--limit", String(Self.searchLimit)],
                 timeout: 30)
         }
-        var arguments = ["envelope", "list", "--limit", String(limit)]
+        var arguments = ["envelope", "list", "--conversations", "--limit", String(limit)]
         switch selection {
         case .allInboxes: arguments += ["-m", "all"]
         case .flagged: arguments += ["-m", "flagged"]
@@ -315,25 +315,43 @@ final class MailModel {
 
     private func mailbox(_ id: Int64) -> MailMailbox? { tree.flatMap(\.mailboxes).first { $0.id == id } }
 
-    /// The minimal mailbox picker: All Inboxes, Flagged, then each account's Inbox named as Mail names the
-    /// account. Anything else is a search (`in:`). Ids are `all`, `flagged`, or `mb:<id>`.
-    var mailboxMenu: [(id: String, title: String, selected: Bool)] {
-        var items: [(String, String, Bool)] = [
-            ("all", "All Inboxes", selection == .allInboxes),
-            ("flagged", "Flagged", selection == .flagged),
+    /// The inbox switcher: All Inboxes, Flagged, then each account's Inbox named as Mail names the account (each
+    /// with its unread count), then the Unread Only switch. Anything else is a search (`in:`). Ids are `all`,
+    /// `flagged`, `mb:<id>` and `unread`.
+    var mailboxMenu: [(id: String, title: String, icon: String?, selected: Bool)] {
+        let inboxes = tree.flatMap(\.mailboxes).filter { $0.role == "inbox" }
+        var items: [(String, String, String?, Bool)] = [
+            ("all", "All Inboxes" + Self.badge(inboxes.reduce(0) { $0 + $1.unread }), "tray.2", selection == .allInboxes),
+            ("flagged", "Flagged", "flag", selection == .flagged),
         ]
         for account in tree {
             guard let inbox = account.mailboxes.first(where: { $0.role == "inbox" }) else { continue }
-            let unread = inbox.unread > 0 ? " (\(inbox.unread))" : ""
-            items.append(("mb:\(inbox.id)", account.account.name + unread, selection == .mailbox(inbox.id)))
+            items.append((
+                "mb:\(inbox.id)", account.account.name + Self.badge(inbox.unread), "tray", selection == .mailbox(inbox.id)))
         }
+        items.append(("unread", "Unread Only", "envelope.badge", unreadOnly))
         return items
     }
+
+    /// The switcher button's label: the view you are in, with its unread count.
+    var switcherTitle: String {
+        switch selection {
+        case .allInboxes: return "All Inboxes" + Self.badge(tree.flatMap(\.mailboxes).filter { $0.role == "inbox" }.reduce(0) { $0 + $1.unread })
+        case .flagged: return "Flagged"
+        case .mailbox(let id):
+            guard let box = mailbox(id) else { return "Mailbox" }
+            let account = tree.first { $0.mailboxes.contains { $0.id == id } }?.account.name
+            return (box.role == "inbox" ? account : nil).map { $0 + Self.badge(box.unread) } ?? box.name
+        }
+    }
+
+    private static func badge(_ unread: Int64) -> String { unread > 0 ? " (\(unread.formatted()))" : "" }
 
     func chooseMailbox(menuID: String) {
         switch menuID {
         case "all": selection = .allInboxes
         case "flagged": selection = .flagged
+        case "unread": toggleUnread(); return
         default:
             if menuID.hasPrefix("mb:"), let id = Int64(menuID.dropFirst(3)) { selection = .mailbox(id) } else { return }
         }
@@ -347,13 +365,146 @@ final class MailModel {
 
     // MARK: - Actions
 
-    func openSelectedInMail() async {
-        guard let id = selectedID else { return }
-        guard let result = await MailCLI.run(["open", String(id)]), result.status == 0 else {
-            show("Couldn't open the message in Mail")
+    /// Everything a person can do with a message, from the header, the More menu, a right-click or a shortcut.
+    enum MailAction: Equatable {
+        case reply, replyAll, forward
+        case archive, delete, junk
+        case move(Int64)
+        case markRead(Bool)
+        /// A flag colour (Mail's names), or nil to clear the flag.
+        case flag(String?)
+        case copyLink, openInMail, newMessage
+    }
+
+    /// The names of Mail's seven flag colours, in its order.
+    static let flagColors = ["red", "orange", "yellow", "green", "blue", "purple", "gray"]
+
+    /// The mailboxes of the open message's own account (the places Move can send it to).
+    var moveTargets: [MailMailbox] {
+        guard let envelope = selectedEnvelope else { return [] }
+        let boxes = tree.first { $0.account.id == envelope.account.id }?.mailboxes ?? []
+        return boxes.filter { $0.id != envelope.mailbox.id }
+    }
+
+    func perform(_ action: MailAction) async {
+        switch action {
+        case .newMessage:
+            await run(["draft", "new"], failure: "Couldn't open a new message in Mail")
             return
+        default: break
+        }
+        guard let envelope = selectedEnvelope else { return }
+        let ref = envelope.reference
+        switch action {
+        case .reply: await run(["draft", "reply", ref], failure: "Couldn't start the reply")
+        case .replyAll: await run(["draft", "reply-all", ref], failure: "Couldn't start the reply")
+        case .forward: await run(["draft", "forward", ref], failure: "Couldn't start the forward")
+        case .openInMail: await run(["open", String(envelope.id)], failure: "Couldn't open the message in Mail")
+        case .copyLink:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(envelope.link ?? "mail42://message/\(envelope.id)", forType: .string)
+            show("Link copied")
+        case .markRead(let read): await setRead(envelope, read)
+        case .flag(let color): await setFlag(envelope, color)
+        case .archive: await relocate(envelope, ["archive", ref], done: "Archived")
+        case .delete: await relocate(envelope, ["delete", ref], done: "Moved to Trash")
+        case .junk: await relocate(envelope, ["junk", ref], done: "Marked as junk")
+        case .move(let id):
+            let name = mailbox(id)?.name ?? "mailbox"
+            await relocate(envelope, ["move", ref, String(id)], done: "Moved to \(name)")
+        case .newMessage: break
         }
     }
+
+    /// Runs a verb that opens something in Mail (a draft, a message): there is nothing to change in the list.
+    private func run(_ arguments: [String], failure: String) async {
+        do { _ = try await MailCLI.json(MailActionResult.self, arguments, timeout: 40) } catch { report(error, fallback: failure) }
+    }
+
+    /// Read or unread: the dot and the counts change at once; Mail is told in the background, and if it refuses the
+    /// change is taken back.
+    private func setRead(_ envelope: MailEnvelope, _ read: Bool) async {
+        guard envelope.isRead != read else { return }
+        applyRead(envelope.id, read, mailboxID: envelope.mailbox.id)
+        do {
+            _ = try await MailCLI.json(MailActionResult.self, ["mark", envelope.reference, read ? "read" : "unread"], timeout: 40)
+        } catch {
+            applyRead(envelope.id, !read, mailboxID: envelope.mailbox.id)
+            report(error, fallback: "Couldn't change the message in Mail")
+        }
+    }
+
+    private func applyRead(_ id: Int64, _ read: Bool, mailboxID: Int64) {
+        guard let index = envelopes.firstIndex(where: { $0.id == id }), envelopes[index].isRead != read else { return }
+        envelopes[index].isRead = read
+        adjustUnread(mailboxID, by: read ? -1 : 1)
+    }
+
+    private func adjustUnread(_ mailboxID: Int64, by delta: Int64) {
+        for account in tree.indices {
+            guard let box = tree[account].mailboxes.firstIndex(where: { $0.id == mailboxID }) else { continue }
+            tree[account].mailboxes[box].unread = max(0, tree[account].mailboxes[box].unread + delta)
+            treeSignature = Self.signature(of: tree)               // our own change is not "news" for the watcher
+        }
+    }
+
+    private func setFlag(_ envelope: MailEnvelope, _ color: String?) async {
+        let before = envelope.isFlagged
+        if let index = envelopes.firstIndex(where: { $0.id == envelope.id }) { envelopes[index].isFlagged = color != nil }
+        do {
+            var arguments = ["mark", envelope.reference, color == nil ? "unflagged" : "flagged"]
+            if let color { arguments += ["--color", color] }
+            _ = try await MailCLI.json(MailActionResult.self, arguments, timeout: 40)
+        } catch {
+            if let index = envelopes.firstIndex(where: { $0.id == envelope.id }) { envelopes[index].isFlagged = before }
+            report(error, fallback: "Couldn't change the flag in Mail")
+        }
+    }
+
+    /// Archive, delete, junk, move: the conversation leaves the list at once and the next one is opened; if Mail
+    /// refuses, the list is reloaded so it shows what is really there.
+    private func relocate(_ envelope: MailEnvelope, _ arguments: [String], done: String) async {
+        let position = envelopes.firstIndex { $0.id == envelope.id }
+        envelopes.removeAll { $0.id == envelope.id }
+        if !envelope.isRead { adjustUnread(envelope.mailbox.id, by: -1) }
+        if selectedID == envelope.id {
+            let next = position.flatMap { envelopes.indices.contains($0) ? envelopes[$0] : envelopes.last }
+            if let next { select(next.id) } else { clearSelection() }
+        }
+        do {
+            _ = try await MailCLI.json(MailActionResult.self, arguments, timeout: 60)
+            show(done)
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                await self?.refreshQuietly()
+            }
+        } catch {
+            report(error, fallback: "Mail couldn't do that")
+            await refreshQuietly()
+        }
+    }
+
+    private func clearSelection() {
+        selectedID = nil
+        selectedSnapshot = nil
+        readerGeneration += 1
+        reader = .none
+        attachments = []
+    }
+
+    /// Says why an action failed, in one line (the CLI's own words when it has them).
+    private func report(_ error: any Error, fallback: String) {
+        if let failure = error as? MailFailure {
+            switch failure.code {
+            case "automation_denied", "mail_timeout", "no_archive_mailbox": show(failure.message)
+            default: show(fallback + ": " + failure.message)
+            }
+        } else {
+            show(fallback)
+        }
+    }
+
+    func openSelectedInMail() async { await perform(.openInMail) }
 
     func openFullDiskAccessSettings() async {
         _ = await MailCLI.run(["permissions", "open"], timeout: 20)
@@ -392,6 +543,16 @@ final class MailModel {
         selectedID = id
         selectedSnapshot = envelopes.first { $0.id == id }
         showReader(id: id)
+        // Opening a message reads it: the dot goes at once, and Mail is told in the background.
+        if let envelope = selectedSnapshot, !envelope.isRead { Task { await setRead(envelope, true) } }
+    }
+
+    /// Moves the selection to the row above (-1) or below (+1) the open one.
+    func moveSelection(by step: Int) {
+        guard !envelopes.isEmpty else { return }
+        let current = envelopes.firstIndex { $0.id == selectedID } ?? (step > 0 ? -1 : envelopes.count)
+        let target = min(max(current + step, 0), envelopes.count - 1)
+        select(envelopes[target].id)
     }
 
     func retryReader() {

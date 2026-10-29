@@ -141,21 +141,6 @@ private struct MailWebBody: View {
 
 // MARK: - Small shared pieces
 
-struct MailAvatar: View {
-    let person: MailPerson
-    var size: CGFloat = 28
-
-    var body: some View {
-        ZStack {
-            Circle().fill(Color.accentColor.opacity(0.18))
-            Text(person.initials)
-                .font(.system(size: size * 0.4, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
-        }
-        .frame(width: size, height: size)
-    }
-}
-
 struct MailPlaceholder: View {
     let symbol: String
     let title: String

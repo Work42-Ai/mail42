@@ -1,7 +1,9 @@
-// MailWidget.swift — mail42's Mail widget (WOR-443): a lightweight, read-only reader over Apple Mail.
+// MailWidget.swift — Mail42: a mail client over Apple Mail, inside Work42.
 //
-// Everything comes from the `mail42` CLI, which reads Apple Mail live. The tab-bar row carries the controls (mailbox
-// menu, Unread, Open in Mail); the tile itself is a message list beside the rendered message. Links only Work42PluginKit + Work42UI.
+// Everything comes from the `mail42` CLI, which reads Apple Mail live and asks Mail itself to act. Two controls sit in
+// the tab-bar row (the inbox switcher and New); everything that acts on a message is in the widget header (see
+// MailHeader), on a row's right-click, or on the keyboard. The tile itself is a conversation list beside the reader.
+// Links only Work42PluginKit + Work42UI.
 
 import AppKit
 import Observation
@@ -13,10 +15,11 @@ import Work42PluginKit
 @Observable
 final class MailWidget: Work42Widget, Work42WidgetCustomHeader {
 
+    // The id stays `mail` so a tile placed before the rename keeps working.
     let id = "mail"
-    let title = "Mail"
+    let title = "Mail42"
     let icon = "envelope"
-    var minSize: WidgetMinSize { WidgetMinSize(width: 520, height: 320) }
+    var minSize: WidgetMinSize { WidgetMinSize(width: 640, height: 360) }
     var contentPadding: Double { 0 }
     var linkIntents: [WidgetLinkIntentSpec] {
         // The "mail42 needs setup" label links here; the host reveals the widget before `perform`.
@@ -27,30 +30,28 @@ final class MailWidget: Work42Widget, Work42WidgetCustomHeader {
 
     var intents: [WidgetIntentSpec] {
         [
+            // The inbox switcher: All Inboxes, Flagged, each account's Inbox, and the Unread Only switch. Its label is
+            // the view you are in with its unread count.
             WidgetIntentSpec(
-                name: "mailbox", title: "Mailbox", icon: "tray.2",
-                keywords: ["inbox", "folder", "account"],
+                name: "inbox", title: "Inbox", icon: "tray.2",
+                keywords: ["mailbox", "folder", "account", "unread", "filter"],
                 placement: [.palette, .actionArea],
                 actionAreaStyle: .menu(
                     options: { [model] in
-                        model.mailboxMenu.map { WidgetIntentMenuOption(id: $0.id, title: $0.title, isSelected: $0.selected) }
+                        model.mailboxMenu.map {
+                            WidgetIntentMenuOption(id: $0.id, title: $0.title, icon: $0.icon, isSelected: $0.selected)
+                        }
                     },
                     onSelect: { [model] id in model.chooseMailbox(menuID: id) }),
+                isEnabled: nil,
+                actionAreaTitle: { [model] in model.switcherTitle },
                 perform: {}),
             WidgetIntentSpec(
-                name: "unread", title: "Unread Only", icon: "envelope.badge",
-                keywords: ["filter"],
-                placement: [.palette, .actionArea],
-                actionAreaStyle: .icon,
-                isConfirmed: { [model] in model.unreadOnly },
-                performWithServices: { [model] _ in model.toggleUnread() }),
-            WidgetIntentSpec(
-                name: "open-in-mail", title: "Open in Mail", icon: "arrow.up.forward.app",
-                keywords: ["reply", "archive", "mail.app"],
+                name: "new", title: "New Message", icon: "square.and.pencil",
+                keywords: ["compose", "write", "email"],
                 placement: [.palette, .actionArea],
                 actionAreaStyle: .labeled,
-                isEnabled: { [model] in model.selectedID != nil },
-                perform: { [model] in await model.openSelectedInMail() }),
+                perform: { [model] in await model.perform(.newMessage) }),
         ]
     }
 
@@ -72,22 +73,6 @@ final class MailWidget: Work42Widget, Work42WidgetCustomHeader {
 
 }
 
-private struct MailHeader: View {
-    let model: MailModel
-
-    var body: some View {
-        HStack(spacing: DT.s8) {
-            Text(model.title)
-                .font(.system(size: DT.f12, weight: .medium))
-                .foregroundStyle(.primary)
-            Text(model.detail)
-                .font(.system(size: DT.f10))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Spacer(minLength: DT.s8)
-        }
-    }
-}
 
 // MARK: - Entry points
 
