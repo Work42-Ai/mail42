@@ -2,7 +2,7 @@
 //
 // Apple Mail's Envelope Index only knows an account by a UUID (`imap://<uuid>/INBOX`). The name and address live in
 // the system Accounts database (`~/Library/Accounts/Accounts4.sqlite`): a Mail account row (identified by that
-// UUID) has no address of its own, but its PARENT account does (`yansarorodriguezpaez@gmail.com`, described as
+// UUID) has no address of its own, but its PARENT account does (`user@example.com`, described as
 // "Google"), which is exactly what Mail's sidebar shows. Like the Envelope Index, the database is only ever read
 // through a private copy, and any problem (no file, no access, a schema that changed) just means "no names": the
 // caller falls back to the UUID rather than failing.
@@ -13,7 +13,7 @@ import Mail42Kit
 public enum AccountDirectory {
 
     public struct Info: Equatable, Sendable {
-        /// The account's display name as Mail shows it ("Google", "yan@web42.ai", "On My Mac").
+        /// The account's display name as Mail shows it ("Google", "work@example.com", "On My Mac").
         public let name: String?
         /// The account's address, when it has one.
         public let email: String?
