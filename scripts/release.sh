@@ -114,7 +114,9 @@ grep -Fq "Authority=Developer ID Application" <<<"$signature" || die "not signed
 grep -Fq "flags=0x10000(runtime)" <<<"$signature" || die "Hardened Runtime is not enabled"
 
 echo "==> package"
-(cd "$out" && ditto -c -k --keepParent mail42.app mail42.zip)
+# --norsrc --noextattr: no `._*` AppleDouble entries in the zip. Without them, plain `unzip` extracts the app with extra
+# files in it, which breaks the code seal and makes Gatekeeper call a notarised app "damaged".
+(cd "$out" && ditto -c -k --keepParent --norsrc --noextattr mail42.app mail42.zip)
 
 echo "==> notarize (waits for Apple)"
 notary=()
@@ -125,7 +127,7 @@ grep -Eq "status: Accepted" <<<"$submission" || die "notarization was not accept
 
 echo "==> staple the ticket and repackage"
 xcrun stapler staple "$out/mail42.app"
-(cd "$out" && rm -f mail42.zip && ditto -c -k --keepParent mail42.app mail42.zip)
+(cd "$out" && rm -f mail42.zip && ditto -c -k --keepParent --norsrc --noextattr mail42.app mail42.zip)
 
 echo "==> checksum"
 (cd "$out" && shasum -a 256 mail42.zip > mail42.zip.sha256 && shasum -a 256 -c mail42.zip.sha256)
@@ -136,6 +138,13 @@ ditto -x -k "$out/mail42.zip" "$check_dir"
 codesign --verify --deep --strict "$check_dir/mail42.app"
 spctl --assess --type execute --verbose=2 "$check_dir/mail42.app"
 "$check_dir/mail42.app/Contents/MacOS/mail42" --version
+
+# People also unpack with plain `unzip` (curl | unzip): the seal must hold there too, and nothing may be added to the bundle.
+echo "==> check a plain unzip too"
+plain_dir="$(mktemp -d)"; trap 'rm -rf "$check_dir" "$plain_dir"' EXIT
+unzip -q "$out/mail42.zip" -d "$plain_dir"
+codesign --verify --deep --strict "$plain_dir/mail42.app" || die "the zip does not survive a plain unzip (code seal broken)"
+spctl --assess --type execute --verbose=2 "$plain_dir/mail42.app" || die "Gatekeeper rejects the app after a plain unzip"
 
 echo
 echo "Candidate ready in $out/ (mail42.zip, mail42.zip.sha256)."
