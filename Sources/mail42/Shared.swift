@@ -44,6 +44,7 @@ enum CLI {
     static func exitCode(for error: Mail42Error) -> Int32 {
         switch error {
         case .fdaDenied, .noMailData, .schemaUnsupported: return 1
+        case .automationDenied, .mailTimeout, .noArchiveMailbox, .actionFailed: return 1
         default: return 2
         }
     }
@@ -64,6 +65,15 @@ enum CLI {
     }
 
     static func wantsJSON(_ args: [String]) -> Bool { args.contains("--json") }
+
+    /// Every value of a repeatable flag (`--to a --to b`), each also split on commas.
+    static func argValues(_ args: [String], _ name: String) -> [String] {
+        var values: [String] = []
+        for (index, arg) in args.enumerated() where arg == name && index + 1 < args.count {
+            values += args[index + 1].split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        }
+        return values
+    }
 
     /// First non-flag argument (positional), so `--json` may appear before or after it.
     static func firstPositional(_ args: [String]) -> String? {

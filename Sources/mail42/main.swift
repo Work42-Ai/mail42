@@ -20,7 +20,12 @@ enum Dispatcher {
 
     /// The verbs that read Apple Mail's files, so they must run as mail42's own permission principal (the one the
     /// user grants Full Disk Access to), not as whatever launched them.
-    private static let readVerbs: Set<String> = ["mailbox", "envelope", "message", "attachment", "open"]
+    private static let readVerbs: Set<String> = [
+        "mailbox", "envelope", "message", "attachment", "open",
+        // The action verbs ask Mail to do things, so they need mail42's own identity too: macOS then asks whether
+        // *mail42* may control Mail.
+        "mark", "move", "archive", "delete", "junk", "draft",
+    ]
 
     static func run(command: String, args: [String]) {
         if readVerbs.contains(command) {
@@ -37,6 +42,8 @@ enum Dispatcher {
             AttachmentCommand.run(args: args)
         case "open":
             OpenCommand.run(args: args)
+        case "mark", "move", "archive", "delete", "junk", "draft":
+            ActionCommand.run(command: command, args: args)
         case "permissions":
             PermissionsCommand.run(args: args)
         case "version", "--version", "-v":
@@ -56,9 +63,10 @@ enum Dispatcher {
 
         Usage: mail42 <command> [options]
 
-        Every verb accepts --json. mail42 only reads, live, from Apple Mail's own data: it keeps no copy of your
-        mail, never changes Apple Mail and never sends mail. Errors with --json are
-        {"error":{"code","message"}}. Exit codes: 0 ok, 1 failed or not granted, 2 usage / not found / bad query.
+        Every verb accepts --json. mail42 reads live from Apple Mail's own data and keeps no copy of your mail. It
+        never edits Apple Mail's files and never sends mail: anything that changes mail is asked of Mail itself.
+        Errors with --json are {"error":{"code","message"}}. Exit codes: 0 ok, 1 failed or not granted (Full Disk
+        Access, Automation, Mail timed out), 2 usage / not found / bad query.
 
         Mail:
           mailbox list [--json]
@@ -83,6 +91,17 @@ enum Dispatcher {
                 List a message's attachments, or copy one out (default ~/Downloads).
           open <id>
                 Open the message in Mail.app.
+
+        Act (through Apple Mail; a message is an id or a mail42://message/… link; the first one asks macOS to let
+        mail42 control Mail):
+          mark <id> read|unread|flagged|unflagged [--color red|orange|yellow|green|blue|purple|gray]
+          move <id> <mailbox id|name>        (a mailbox of the message's own account)
+          archive <id>                       (to the account's Archive; Gmail: removes it from the Inbox)
+          delete <id>                        (to the Trash)
+          junk <id>                          (marks it junk and moves it to Junk)
+          draft reply|reply-all|forward <id>
+          draft new [--to <addr>] [--cc <addr>] [--subject <text>] [--body <text>]
+                Drafts open Mail's compose window, filled in. mail42 never sends: you press Send in Mail.
 
         Access:
           permissions [--json]

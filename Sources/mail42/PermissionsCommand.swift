@@ -5,6 +5,7 @@
 // jumps to the right System Settings pane.
 
 import Foundation
+import Mail42Actions
 import Mail42AppleMail
 import Mail42Kit
 
@@ -32,6 +33,8 @@ enum PermissionsCommand {
             check(args: args)
         case "open":
             openSettings()
+        case "automation":
+            automation(args: args)
         case let other?:
             CLI.fail(code: "usage", message: "unknown permissions subcommand `\(other)` (try `permissions` or `permissions open`)",
                      exit: 2, json: CLI.wantsJSON(args))
@@ -62,6 +65,49 @@ enum PermissionsCommand {
             }
         }
         exit(state == .granted ? 0 : 1)
+    }
+
+    /// `permissions automation`: whether mail42 may control Mail (needed by mark, move, archive, delete, junk and
+    /// drafts). The first run makes macOS ask; answer Allow. Exit 0 when allowed.
+    private static func automation(args: [String]) {
+        let json = CLI.wantsJSON(args)
+        Mail42Daemon.reexecIfNeeded(arguments: ["permissions"] + args)
+        // `--check` only reports the state (it never shows the prompt); otherwise macOS asks if it hasn't been asked.
+        let askUser = !args.contains("--check")
+        let state = AutomationPermission.state(askUser: askUser)
+        if args.contains("--state") || args.contains("--check") {
+            let name: String
+            switch state {
+            case .granted: name = "granted"
+            case .denied: name = "denied"
+            case .notDetermined: name = "not_determined"
+            case .mailNotRunning: name = "mail_not_running"
+            case .other(let code): name = "status_\(code)"
+            }
+            if json { CLI.emitJSONObject(["automation": name] as [String: Any]) } else { print("Automation: \(name)") }
+            exit(state == .granted ? 0 : 1)
+        }
+        do {
+            let accounts = try MailActions().probe()
+            if json {
+                CLI.emitJSONObject(["automation": "granted", "mail_accounts": accounts] as [String: Any])
+            } else {
+                print("Automation: granted (Mail answered; it has \(accounts) accounts)")
+            }
+        } catch Mail42Error.automationDenied {
+            if json { CLI.emitJSONObject(["automation": "denied"] as [String: Any]) } else {
+                print("Automation: denied")
+                print("Open System Settings › Privacy & Security › Automation, turn on Mail under mail42, then run this again.")
+            }
+            exit(1)
+        } catch Mail42Error.mailTimeout {
+            if json { CLI.emitJSONObject(["automation": "no_answer"] as [String: Any]) } else {
+                print("Automation: Mail didn't answer in two minutes. If macOS is asking whether mail42 may control Mail, answer Allow; then run this again.")
+            }
+            exit(1)
+        } catch {
+            CLI.fail(error: error, json: json)
+        }
     }
 
     private static func openSettings() {

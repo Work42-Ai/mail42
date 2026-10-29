@@ -29,10 +29,22 @@ public enum Mail42Error: Error, LocalizedError, Equatable {
     case attachmentNotDownloaded(String)
     /// A file couldn't be written (an attachment copy, or a `--out` file).
     case writeFailed(String)
+    /// macOS refused to let mail42 control Mail (Automation isn't allowed for mail42).
+    case automationDenied
+    /// Mail didn't answer in time. Whether the action happened is unknown, so it is never retried.
+    case mailTimeout
+    /// The account has no archive mailbox to move a message to.
+    case noArchiveMailbox(String)
+    /// Mail refused or failed an action (the message is Mail's own error text).
+    case actionFailed(String)
 
     /// Stable machine-readable code (the `error.code` in `--json` output).
     public var code: String {
         switch self {
+        case .automationDenied: return "automation_denied"
+        case .mailTimeout: return "mail_timeout"
+        case .noArchiveMailbox: return "no_archive_mailbox"
+        case .actionFailed: return "action_failed"
         case .fdaDenied: return "fda_denied"
         case .noMailData: return "no_mail_data"
         case .schemaUnsupported: return "schema_unsupported"
@@ -77,6 +89,16 @@ public enum Mail42Error: Error, LocalizedError, Equatable {
                 + "Open the message in Mail (`mail42 open <id>`) so it fetches it, then try again."
         case .writeFailed(let message):
             return "Couldn't write the file: \(message)"
+        case .automationDenied:
+            return "macOS didn't let mail42 control Mail. Open System Settings › Privacy & Security › Automation, "
+                + "turn on Mail under mail42, then try again."
+        case .mailTimeout:
+            return "Mail didn't answer in 20 seconds. The action may or may not have happened; check Mail before "
+                + "trying again."
+        case .noArchiveMailbox(let account):
+            return "The account \(account) has no Archive mailbox to move the message to."
+        case .actionFailed(let message):
+            return "Mail couldn't do that: \(message)"
         }
     }
 }

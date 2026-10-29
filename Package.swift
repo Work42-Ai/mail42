@@ -17,6 +17,7 @@ let package = Package(
     products: [
         .library(name: "Mail42Kit", targets: ["Mail42Kit"]),
         .library(name: "Mail42AppleMail", targets: ["Mail42AppleMail"]),
+        .library(name: "Mail42Actions", targets: ["Mail42Actions"]),
         .executable(name: "mail42", targets: ["mail42"]),
     ],
     targets: [
@@ -30,9 +31,16 @@ let package = Package(
             dependencies: ["Mail42Kit"],
             path: "Sources/Mail42AppleMail"
         ),
+        // What mail42 asks Apple Mail to do (mark, move, archive, delete, junk, drafts): Apple Events to Mail.app,
+        // never a send. Knows nothing about how mail is read; it is handed a `MessageRef` and the mailbox paths.
+        .target(
+            name: "Mail42Actions",
+            dependencies: ["Mail42Kit"],
+            path: "Sources/Mail42Actions"
+        ),
         .executableTarget(
             name: "mail42",
-            dependencies: ["Mail42Kit", "Mail42AppleMail"],
+            dependencies: ["Mail42Kit", "Mail42AppleMail", "Mail42Actions"],
             path: "Sources/mail42"
         ),
         // Test-only helpers shared by both test targets: a builder for synthetic Envelope Index databases and
@@ -46,6 +54,11 @@ let package = Package(
             name: "Mail42KitTests",
             dependencies: ["Mail42Kit", "Mail42TestSupport"],
             path: "Tests/Mail42KitTests"
+        ),
+        .testTarget(
+            name: "Mail42ActionsTests",
+            dependencies: ["Mail42Actions", "Mail42Kit"],
+            path: "Tests/Mail42ActionsTests"
         ),
         .testTarget(
             name: "Mail42AppleMailTests",

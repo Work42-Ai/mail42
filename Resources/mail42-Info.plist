@@ -23,5 +23,7 @@
     <string>15.0</string>
     <key>CFBundleExecutable</key>
     <string>mail42</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>mail42 asks Mail to mark, move and draft messages when you or your agent ask it to. It never sends mail.</string>
 </dict>
 </plist>

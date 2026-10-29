@@ -84,7 +84,7 @@ import Mail42TestSupport
         }
     }
 
-    private func run(_ args: [String], _ f: Fixture) throws -> Run {
+    func run(_ args: [String], _ f: Fixture) throws -> Run {
         let process = Process()
         process.executableURL = Self.binary
         process.arguments = args
@@ -94,6 +94,7 @@ import Mail42TestSupport
         env[Mail42Paths.Override.mailLibrary] = f.mail.library.path
         env[Mail42Paths.Override.accountsDatabase] = f.accountsDB.path
         env["MAIL42_OPEN_DRY_RUN"] = "1"                       // never launch Mail.app from a test
+        env["MAIL42_ACTIONS_DRY_RUN"] = "1"                    // …and never ask Mail to do anything: print the script
         process.environment = env
         let out = Pipe(), err = Pipe()
         process.standardOutput = out
@@ -112,7 +113,7 @@ import Mail42TestSupport
     }
 
     /// The fixture, or `nil` when the binary isn't built. (Nothing to sync: the verbs read the store live.)
-    private func synced() throws -> Fixture? {
+    func synced() throws -> Fixture? {
         guard Self.requireBinary() else { return nil }
         return try Fixture()
     }
