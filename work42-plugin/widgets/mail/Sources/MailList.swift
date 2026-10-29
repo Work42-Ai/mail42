@@ -94,6 +94,8 @@ private struct MailRows: View {
         .focusEffectDisabled()
         .onKeyPress(.upArrow) { model.moveSelection(by: -1); return .handled }
         .onKeyPress(.downArrow) { model.moveSelection(by: 1); return .handled }
+        .onKeyPress(.leftArrow) { model.moveInThread(by: -1); return .handled }
+        .onKeyPress(.rightArrow) { model.moveInThread(by: 1); return .handled }
         .onKeyPress(keys: [.delete, .deleteForward]) { _ in
             guard model.selectedEnvelope != nil else { return .ignored }
             Task { await model.perform(.delete) }

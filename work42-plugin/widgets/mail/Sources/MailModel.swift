@@ -47,6 +47,8 @@ private struct ReaderEntry {
     let url: URL?
     let key: String
     let attachments: [MailAttachment]
+    /// Which theme the page was written in; a page from another theme is written again.
+    let theme: Int
     var unavailable: Bool { file == nil }
 }
 
@@ -70,6 +72,16 @@ final class MailModel {
     private(set) var selectedID: Int64?
     private(set) var reader: MailReaderState = .none
     private(set) var attachments: [MailAttachment] = []
+    /// Every message of the open conversation (all mailboxes, Sent included), oldest first.
+    private(set) var thread: [MailEnvelope] = []
+    /// The message of the thread whose body is open; the others show as one line.
+    private(set) var expandedID: Int64?
+    /// Whether the open message shows every address and the full date.
+    var showDetails = false
+    /// Set when a `mail42://` link points at a message that is no longer in Mail.
+    private(set) var missingMessage = false
+    /// A link clicked before the tile was ready; it opens once the list has loaded.
+    private var pendingLink: URL?
     /// A short, transient message under the toolbar ("Saved report.pdf").
     private(set) var notice: String?
 
@@ -177,6 +189,7 @@ final class MailModel {
             envelopes = page
             canLoadMore = query.trimmingCharacters(in: .whitespaces).isEmpty && page.count >= Self.pageSize
             state = loaded.isEmpty ? .noMail : .ready
+            if state == .ready, let link = pendingLink { await openLink(link) }
         } catch {
             apply(error)
         }
@@ -435,9 +448,16 @@ final class MailModel {
     }
 
     private func applyRead(_ id: Int64, _ read: Bool, mailboxID: Int64) {
-        guard let index = envelopes.firstIndex(where: { $0.id == id }), envelopes[index].isRead != read else { return }
-        envelopes[index].isRead = read
-        adjustUnread(mailboxID, by: read ? -1 : 1)
+        var changed = false
+        if let index = envelopes.firstIndex(where: { $0.id == id }), envelopes[index].isRead != read {
+            envelopes[index].isRead = read
+            changed = true
+        }
+        if let index = thread.firstIndex(where: { $0.id == id }), thread[index].isRead != read {
+            thread[index].isRead = read
+            changed = true
+        }
+        if changed { adjustUnread(mailboxID, by: read ? -1 : 1) }
     }
 
     private func adjustUnread(_ mailboxID: Int64, by delta: Int64) {
@@ -487,6 +507,8 @@ final class MailModel {
     private func clearSelection() {
         selectedID = nil
         selectedSnapshot = nil
+        thread = []
+        expandedID = nil
         readerGeneration += 1
         reader = .none
         attachments = []
@@ -510,8 +532,27 @@ final class MailModel {
         _ = await MailCLI.run(["permissions", "open"], timeout: 20)
     }
 
+    /// Previews an attachment with macOS Quick Look: it is copied to a temporary folder and `qlmanage` shows it.
+    func quickLook(_ attachment: MailAttachment) async {
+        guard let id = expandedID ?? selectedID else { return }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("mail42-quicklook-\(id)", isDirectory: true)
+        do {
+            nonisolated struct Saved: Decodable, Sendable { let path: String }
+            let saved = try await MailCLI.json(
+                Saved.self, ["attachment", "save", String(id), attachment.part, "--to", folder.path])
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/qlmanage")
+            process.arguments = ["-p", saved.path]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+        } catch {
+            report(error, fallback: "Couldn't preview the attachment")
+        }
+    }
+
     func saveAttachment(_ attachment: MailAttachment) async {
-        guard let id = selectedID else { return }
+        guard let id = expandedID ?? selectedID else { return }
         let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first?.path
             ?? NSHomeDirectory() + "/Downloads"
         do {
@@ -540,11 +581,87 @@ final class MailModel {
 
     func select(_ id: Int64) {
         guard id != selectedID else { return }
+        missingMessage = false
         selectedID = id
         selectedSnapshot = envelopes.first { $0.id == id }
-        showReader(id: id)
+        beginReading(id: id)
         // Opening a message reads it: the dot goes at once, and Mail is told in the background.
         if let envelope = selectedSnapshot, !envelope.isRead { Task { await setRead(envelope, true) } }
+    }
+
+    /// Opens `id` in the reader and loads its conversation.
+    private func beginReading(id: Int64) {
+        expandedID = id
+        showDetails = false
+        thread = selectedSnapshot.map { [$0] } ?? []
+        showReader(id: id)
+        Task { [weak self] in
+            guard let loaded = try? await MailCLI.json([MailEnvelope].self, ["message", "thread", String(id)]) else { return }
+            guard let self, self.selectedID == id, !loaded.isEmpty else { return }
+            self.thread = loaded
+        }
+    }
+
+    /// Opens another message of the conversation (a collapsed row was clicked, or ← →).
+    func expand(_ id: Int64) {
+        guard id != expandedID, let target = thread.first(where: { $0.id == id }) else { return }
+        expandedID = id
+        showDetails = false
+        showReader(id: id)
+        if !target.isRead { Task { await setRead(target, true) } }
+    }
+
+    func moveInThread(by step: Int) {
+        guard let current = thread.firstIndex(where: { $0.id == expandedID }) else { return }
+        let target = current + step
+        if thread.indices.contains(target) { expand(thread[target].id) }
+    }
+
+    /// The message whose body is open (it may be an earlier one of the conversation).
+    var expandedEnvelope: MailEnvelope? {
+        thread.first { $0.id == expandedID } ?? selectedEnvelope
+    }
+
+    /// True when the open message was reached by a link and the list is showing something else.
+    var isOutsideView: Bool {
+        guard let selectedID else { return false }
+        return !envelopes.contains { $0.id == selectedID }
+    }
+
+    /// Whether a message is the user's own (Sent, or from the account's address): drawn in the "You" colour.
+    func isMine(_ envelope: MailEnvelope) -> Bool {
+        if envelope.mailbox.role == "sent" { return true }
+        guard let mine = envelope.account.email?.lowercased(), let from = envelope.from.addr?.lowercased() else { return false }
+        return mine == from
+    }
+
+    // MARK: - mail42:// links
+
+    /// Opens the message a `mail42://message/…` link points at, wherever Mail has put it now.
+    func openLink(_ url: URL) async {
+        guard state == .ready else { pendingLink = url; return }
+        pendingLink = nil
+        var arguments = ["message", "resolve", url.absoluteString]
+        if case .mailbox(let id) = selection { arguments += ["--prefer-mailbox", String(id)] }
+        do {
+            let found = try await MailCLI.json(MailEnvelope.self, arguments)
+            missingMessage = false
+            if envelopes.contains(where: { $0.id == found.id }) {
+                select(found.id)
+            } else {
+                // Not in this list (another mailbox, or archived): open it anyway; the list stays as it is.
+                guard found.id != selectedID else { return }
+                selectedID = found.id
+                selectedSnapshot = found
+                beginReading(id: found.id)
+                if !found.isRead { Task { await setRead(found, true) } }
+            }
+        } catch let failure as MailFailure where failure.code == "not_found" {
+            clearSelection()
+            missingMessage = true
+        } catch {
+            report(error, fallback: "Couldn't open that message")
+        }
     }
 
     /// Moves the selection to the row above (-1) or below (+1) the open one.
@@ -565,11 +682,14 @@ final class MailModel {
         readerGeneration += 1
         let generation = readerGeneration
         prefetchTask?.cancel()
-        if let entry = readerCache[id] {                            // already written: show it at once
-            present(entry, id: id)
-            touch(id)
-            prefetchNeighbors(of: id)
-            return
+        if let entry = readerCache[id] {
+            if entry.theme == CanvasTheme.tokensCSS().hashValue {   // already written in this theme: show it at once
+                present(entry, id: id)
+                touch(id)
+                prefetchNeighbors(of: id)
+                return
+            }
+            evict(id)                                               // the theme changed since: write it again
         }
         reader = .loading(id)
         attachments = []
@@ -611,14 +731,21 @@ final class MailModel {
         let result = try await MailCLI.json(
             MailReadResult.self, ["message", "read", String(id), "--html", "--out", file.path])
         let listed = (try? await list) ?? []
+        let tokens = CanvasTheme.tokensCSS()
+        let stamp = tokens.hashValue
         if result.bodyUnavailable {
             try? FileManager.default.removeItem(at: file)
-            return ReaderEntry(file: nil, url: nil, key: "mail42:\(key)", attachments: listed)
+            return ReaderEntry(file: nil, url: nil, key: "mail42:\(key)", attachments: listed, theme: stamp)
         }
+        // Put the message in Work42's theme (see MailBodyTheme), off the main thread: a newsletter can be megabytes.
+        await Task.detached(priority: .userInitiated) {
+            guard let html = try? String(contentsOf: file, encoding: .utf8) else { return }
+            try? MailBodyTheme.wrap(html, tokens: tokens).write(to: file, atomically: true, encoding: .utf8)
+        }.value
         guard let url = readerURL(fileName: file.lastPathComponent) else {
             throw MailFailure(code: "no_server", message: "Work42's local artifact server isn't answering yet.")
         }
-        return ReaderEntry(file: file, url: url, key: "mail42:\(key)", attachments: listed)
+        return ReaderEntry(file: file, url: url, key: "mail42:\(key)", attachments: listed, theme: stamp)
     }
 
     /// Warms the next messages in the list so stepping through them is instant.

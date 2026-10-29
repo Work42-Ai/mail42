@@ -23,7 +23,11 @@ final class MailWidget: Work42Widget, Work42WidgetCustomHeader {
     var contentPadding: Double { 0 }
     var linkIntents: [WidgetLinkIntentSpec] {
         // The "mail42 needs setup" label links here; the host reveals the widget before `perform`.
-        [WidgetLinkIntentSpec(matchers: [.regex(#"^mail42://widget/mail$"#)], perform: { _ in })]
+        [
+            WidgetLinkIntentSpec(matchers: [.regex(#"^mail42://widget/mail$"#)], perform: { _ in }),
+            // A link to one message, from chat, an agent's reply or a doc: reveal the tile and open that message.
+            WidgetLinkIntentSpec(matchers: [.regex(#"^mail42://message/"#)], perform: { [model] url in await model.openLink(url) }),
+        ]
     }
 
     @ObservationIgnored let model = MailModel()
