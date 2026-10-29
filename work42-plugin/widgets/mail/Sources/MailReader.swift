@@ -37,7 +37,10 @@ struct MailReaderPane: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.easeInOut(duration: 0.25), value: model.selectedEnvelope?.id)
+        // Fade only between "nothing selected" and a conversation. Between two conversations the old web view is
+        // replaced at once: fading one out while the next fades in leaves two web views alive together, and the
+        // outgoing one's teardown switched highlight-to-comment off for the new one.
+        .animation(.easeInOut(duration: 0.25), value: model.selectedEnvelope == nil)
         .animation(.easeInOut(duration: 0.25), value: model.missingMessage)
     }
 }
@@ -108,11 +111,10 @@ private struct MailThread: View {
                 if openIndex > 0 { folded(Array(messages[..<openIndex])) }
                 MailOpenMessage(model: model, services: services, envelope: messages[openIndex])
                     .frame(maxHeight: .infinity)
-                    .id(messages[openIndex].id)
-                    .transition(.opacity)
                 if openIndex < messages.count - 1 { folded(Array(messages[(openIndex + 1)...])) }
             }
-            .animation(.easeInOut(duration: 0.22), value: model.expandedID)
+            // No animation here: opening another message swaps the web view, and two alive at once break the
+            // highlight-to-comment pipeline (see MailReaderPane).
         } else {
             // Everything folded: the whole conversation as rows.
             ScrollView {
