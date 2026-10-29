@@ -9,29 +9,39 @@ import SwiftUI
 import Work42PluginKit
 import Work42UI
 
+/// The list's width. The header is split at the same x, so the divider under the list runs up through the header.
+let mailListWidth: CGFloat = 340
+/// How much further in the header's content starts than the tile body's (Work42 draws the header with its own inset).
+let mailHeaderInset: CGFloat = 12
+
 struct MailHeader: View {
     let model: MailModel
 
     var body: some View {
         let hasMessage = model.selectedEnvelope != nil
-        HStack(spacing: DT.s8) {
-            if hasMessage {
-                Button { model.deselect() } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "chevron.left").font(.system(size: DT.f11, weight: .semibold))
-                        Text("Back").font(.system(size: DT.f12, weight: .medium))
-                    }
-                    .padding(.horizontal, 10)
-                    .frame(height: 28)
-                    .background(Capsule().fill(DT.chipFill))
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .help("Back to the list  \u{238B}")
-                .transition(.opacity)
-            }
+        HStack(spacing: 0) {
+            // Left of the divider: the search, always.
             MailSearchField(model: model)
-            Spacer(minLength: DT.s8)
+                .padding(.trailing, DT.s12)
+                .frame(width: mailListWidth - mailHeaderInset, alignment: .leading)
+            Divider().opacity(0.5).frame(maxHeight: .infinity)
+            // Right of the divider: Back (an arrow, while a message is open) and the message actions.
+            HStack(spacing: DT.s8) {
+                if hasMessage {
+                    MailIconButton(symbol: "chevron.left", help: "Back to the list  \u{238B}") { model.deselect() }
+                        .transition(.opacity)
+                }
+                Spacer(minLength: DT.s8)
+                actions(hasMessage)
+            }
+            .padding(.leading, DT.s12)
+        }
+        .lineLimit(1)
+        .animation(.easeInOut(duration: 0.2), value: hasMessage)
+    }
+
+    private func actions(_ hasMessage: Bool) -> some View {
+        HStack(spacing: DT.s8) {
             HStack(spacing: 2) {
                 MailIconButton(symbol: "arrowshape.turn.up.left", help: "Reply  \u{2318}R", enabled: hasMessage) { act(.reply) }
                 MailIconButton(symbol: "arrowshape.turn.up.right", help: "Forward  \u{21E7}\u{2318}F", enabled: hasMessage) { act(.forward) }
@@ -52,8 +62,6 @@ struct MailHeader: View {
                 .help("More actions")
             }
         }
-        .lineLimit(1)
-        .animation(.easeInOut(duration: 0.2), value: hasMessage)
     }
 
     private func act(_ action: MailModel.MailAction) { Task { await model.perform(action) } }
@@ -86,7 +94,6 @@ struct MailSearchField: View {
         }
         .padding(.horizontal, DT.s12)
         .frame(height: 28)
-        .frame(maxWidth: 380)
         .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(DT.chipFill))
     }
 }

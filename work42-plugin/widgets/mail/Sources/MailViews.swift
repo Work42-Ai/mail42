@@ -160,7 +160,7 @@ private struct MailSplit: View {
             }
             HStack(spacing: 0) {
                 MailListPane(model: model)
-                    .frame(minWidth: 260, idealWidth: 320, maxWidth: 380)
+                    .frame(width: mailListWidth)
                 Divider().opacity(0.5)
                 MailReaderPane(model: model, services: services)
             }
