@@ -47,7 +47,7 @@ struct MailListPane: View {
                         symbol: "tray",
                         title: model.query.isEmpty ? "Nothing here" : "No matches",
                         text: model.query.isEmpty ? "No messages in this view." : "Nothing matches that search.")
-                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                        .transition(.opacity)
                 } else {
                     MailRows(model: model).transition(.opacity)
                 }
@@ -133,15 +133,14 @@ struct MailSkeletonRows: View {
     }
 }
 
-/// A row rises into place the first time it shows.
+/// A row fades in the first time it shows.
 struct MailAppear: ViewModifier {
     @State private var shown = false
 
     func body(content: Content) -> some View {
         content
             .opacity(shown ? 1 : 0)
-            .offset(y: shown ? 0 : 10)
-            .onAppear { withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { shown = true } }
+            .onAppear { withAnimation(.easeOut(duration: 0.25)) { shown = true } }
     }
 }
 
