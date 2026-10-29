@@ -12,14 +12,43 @@ enum MessageCommand {
 
     static func run(args: [String]) {
         let json = CLI.wantsJSON(args)
-        let words = CLI.positionals(args, valueFlags: ["--out"])
+        let words = CLI.positionals(args, valueFlags: ["--out", "--prefer-mailbox"])
         switch words.first {
         case "read":
             read(args: args, words: words, json: json)
         case "thread":
             thread(words: words, json: json)
+        case "resolve":
+            resolve(args: args, words: words, json: json)
         default:
-            CLI.usageError("usage: message read <id> [--text|--html|--headers] [--out <file>] | message thread <id>", json: json)
+            CLI.usageError(
+                "usage: message read <id> [--text|--html|--headers] [--out <file>] | message thread <id> | message resolve <link|id> [--prefer-mailbox <id>]",
+                json: json)
+        }
+    }
+
+    // MARK: - resolve
+
+    /// Finds the message a `mail42://message/…` link points at, even after Mail moved it and gave it a new id.
+    private static func resolve(args: [String], words: [String], json: Bool) {
+        guard let text = words.dropFirst().first, let link = MessageLink(string: text) else {
+            CLI.usageError("usage: message resolve <mail42://message/… link | id> [--prefer-mailbox <id>]", json: json)
+        }
+        var preferred: Int64?
+        if let value = CLI.argValue(args, "--prefer-mailbox") {
+            guard let id = Int64(value) else { CLI.usageError("--prefer-mailbox takes a mailbox id, not `\(value)`", json: json) }
+            preferred = id
+        }
+        do {
+            let record = try LiveMail.open().resolve(link, preferMailbox: preferred)
+            if json {
+                CLI.emitJSONObject(Presentation.envelope(record))
+            } else {
+                EnvelopeCommand.show([record], json: false)
+                print(record.link.string)
+            }
+        } catch {
+            CLI.fail(error: error, json: json)
         }
     }
 

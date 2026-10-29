@@ -136,6 +136,47 @@ import Mail42TestSupport
         #expect(try run(["mailbox", "frobnicate", "--json"], f).errorCode == "usage")
     }
 
+    @Test func everyEnvelopeCarriesALinkThatResolves() throws {
+        guard let f = try synced() else { return }
+        defer { f.cleanup() }
+        let list = try run(["envelope", "list", "--limit", "3", "--json"], f)
+        let link = try #require(list.array?.first?["link"] as? String)
+        #expect(link == "mail42://message/10?mid=plain-1%40example.com")
+
+        let resolved = try run(["message", "resolve", link, "--json"], f)
+        #expect(resolved.status == 0 && (resolved.object?["id"] as? NSNumber)?.int64Value == 10)
+        #expect(resolved.object?["link"] as? String == link)
+        #expect(try run(["message", "resolve", "11", "--json"], f).object?["id"] as? NSNumber == 11)     // a bare id works too
+
+        // A message Mail moved (new id, same Message-ID) is found again from its old link.
+        try f.mail.deleteMessage(rowid: 12)
+        try f.mail.addMessage(.init(rowid: 77, subject: "attachment", senderAddress: "qa-attach@example.com", mailboxID: 1,
+                                    dateReceived: Int64(Date().timeIntervalSince1970) - 500, messageIDHeader: "<attach-1@example.com>"))
+        let moved = try run(["message", "resolve", "mail42://message/12?mid=attach-1%40example.com", "--json"], f)
+        #expect(moved.status == 0 && (moved.object?["id"] as? NSNumber)?.int64Value == 77)
+
+        let gone = try run(["message", "resolve", "mail42://message/999?mid=nowhere%40example.com", "--json"], f)
+        #expect(gone.status == 2 && gone.errorCode == "not_found")
+        #expect(try run(["message", "resolve", "nonsense", "--json"], f).errorCode == "usage")
+        #expect(try run(["message", "resolve", "--json"], f).errorCode == "usage")
+    }
+
+    @Test func conversationsListsOneRowPerThread() throws {
+        guard let f = try synced() else { return }
+        defer { f.cleanup() }
+        let rows = try #require(try run(["envelope", "list", "--conversations", "--json"], f).array)
+        // Messages 10 and 11 are one conversation; the others have none.
+        #expect(rows.compactMap { ($0["id"] as? NSNumber)?.int64Value } == [10, 12, 13, 14, 15])
+        #expect((rows[0]["conversation_count"] as? NSNumber)?.intValue == 2)
+        #expect(rows[0]["participants"] as? [String] == ["QA Plain", "QA Html"])
+        #expect((rows[1]["conversation_count"] as? NSNumber)?.intValue == 1)
+        #expect(rows[0]["link"] as? String == "mail42://message/10?mid=plain-1%40example.com")
+
+        let paged = try run(["envelope", "list", "--conversations", "--limit", "1", "--before", "10", "--json"], f)
+        #expect(paged.ids == [12])
+        #expect(try run(["envelope", "list", "--conversations"], f).out.contains("plain zebrafish"))
+    }
+
     @Test func anAccountIsNamedAsMailNamesIt() throws {
         guard let f = try synced() else { return }
         defer { f.cleanup() }
@@ -154,7 +195,7 @@ import Mail42TestSupport
 
         let first = try #require(list.array?.first)
         #expect(Set(first.keys) == ["id", "message_id", "conversation_id", "account", "mailbox", "from", "to", "cc",
-                                    "subject", "date", "snippet", "is_read", "is_flagged", "has_attachments"])
+                                    "subject", "date", "snippet", "is_read", "is_flagged", "has_attachments", "link"])
         #expect(first["message_id"] as? String == "<plain-1@example.com>")
         #expect(first["conversation_id"] as? Int == 5)
         #expect(first["subject"] as? String == "plain zebrafish")

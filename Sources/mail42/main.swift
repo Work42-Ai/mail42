@@ -63,8 +63,10 @@ enum Dispatcher {
         Mail:
           mailbox list [--json]
                 Accounts (named as in Mail) and their mailboxes, with total and unread counts.
-          envelope list [-m <mailbox-id|name|all|flagged>] [--unread] [--flagged] [--limit N] [--before <id>] [--json]
-                Message summaries, newest first (default: every inbox, 50 per page).
+          envelope list [-m <mailbox-id|name|all|flagged>] [--unread] [--flagged] [--conversations] [--limit N] [--before <id>] [--json]
+                Message summaries, newest first (default: every inbox, 50 per page). Every one carries a `link`
+                (mail42://message/…). --conversations gives one row per conversation: its newest message in the view,
+                conversation_count (the whole conversation, Sent included) and participants.
           envelope search "<query>" [--limit N] [--json]
                 Search with from: to: subject: body: in: is:unread|read|flagged has:attachment
                 date:2w.. date:2026-10-01..2026-10-15, plus and / or / not and plain words.
@@ -72,7 +74,10 @@ enum Dispatcher {
           message read <id> [--text|--html|--headers] [--out <file>] [--json]
                 The full message: plain text by default, sanitised HTML with --html.
           message thread <id> [--json]
-                Every message in the same conversation, oldest first.
+                Every message in the same conversation (all mailboxes), oldest first.
+          message resolve <link|id> [--prefer-mailbox <id>] [--json]
+                The message a mail42:// link points at. The row id is tried first; if Mail moved the message, it is
+                found again by its Message-ID.
           attachment list <id> [--json]
           attachment save <id> <part> [--to <dir>] [--json]
                 List a message's attachments, or copy one out (default ~/Downloads).

@@ -134,15 +134,14 @@ public final class LiveMail {
 
     // MARK: - Messages
 
-    public func listEnvelopes(_ options: EnvelopeListOptions) throws -> [EnvelopeRecord] {
+    /// The mailboxes and filters a list of `options` selects (without the paging cursor); nil when nothing can match.
+    private func listPlan(_ options: EnvelopeListOptions) throws -> (mailboxes: [Int64]?, clauses: [String])? {
         var clauses = ["m.deleted = 0"]
-        var params: [SQLiteValue] = []
         let mailboxes: [Int64]?
-
         switch options.mailbox {
         case .allInboxes:
             let ids = mailboxRows.filter { $0.role == "inbox" }.map(\.id)
-            guard !ids.isEmpty else { return [] }
+            guard !ids.isEmpty else { return nil }
             mailboxes = ids
         case .flagged:
             mailboxes = nil
@@ -156,20 +155,166 @@ public final class LiveMail {
         }
         if options.unreadOnly { clauses.append("m.read = 0") }
         if options.flaggedOnly { clauses.append("m.flagged = 1") }
+        return (mailboxes, clauses)
+    }
 
+    /// The date of the message a `--before` cursor names.
+    private func cursorDate(_ before: Int64) throws -> Int64 {
+        guard let date = try snapshot.connection.scalarInt(
+            "SELECT date_received FROM messages WHERE ROWID = ?", [.int(before)]
+        ) else { throw Mail42Error.notFound("message \(before) (the `--before` cursor)") }
+        return date
+    }
+
+    public func listEnvelopes(_ options: EnvelopeListOptions) throws -> [EnvelopeRecord] {
+        guard var plan = try listPlan(options) else { return [] }
+        var params: [SQLiteValue] = []
         if let before = options.beforeID {
-            guard let date = try snapshot.connection.scalarInt(
-                "SELECT date_received FROM messages WHERE ROWID = ?", [.int(before)]
-            ) else { throw Mail42Error.notFound("message \(before) (the `--before` cursor)") }
+            let date = try cursorDate(before)
             // `<= date` first, so the date index can bound the scan; the second test only trims the ties.
-            clauses.append("m.date_received <= ? AND (m.date_received < ? OR m.ROWID < ?)")
+            plan.clauses.append("m.date_received <= ? AND (m.date_received < ? OR m.ROWID < ?)")
             params += [.int(date), .int(date), .int(before)]
         }
-
         return try fetchRecords(
-            mailboxes: mailboxes, clauses: clauses, params: params,
+            mailboxes: plan.mailboxes, clauses: plan.clauses, params: params,
             order: "ORDER BY m.date_received DESC, m.ROWID DESC LIMIT \(max(options.limit, 0))",
             newestFirstLimit: max(options.limit, 0))
+    }
+
+    // MARK: - Conversations
+
+    /// One entry per conversation that has a message in the selected view, newest first: that message, the size of
+    /// the whole conversation and who wrote in it. Paging works like `listEnvelopes`: pass the newest message id of
+    /// the last conversation as `beforeID`. A conversation already shown on an earlier page (it has a message in the
+    /// view newer than the cursor) is not repeated.
+    public func listConversations(_ options: EnvelopeListOptions) throws -> [ConversationRecord] {
+        let wanted = max(options.limit, 0)
+        guard wanted > 0, let plan = try listPlan(options) else { return [] }
+        let cursor = try options.beforeID.map { (id: $0, date: try cursorDate($0)) }
+
+        var newest: [EnvelopeRecord] = []
+        var seen = Set<Int64>()
+        var from = options.beforeID
+        let batch = max(wanted * 3, 60)
+        while newest.count < wanted {
+            var page = options
+            page.limit = batch
+            page.beforeID = from
+            let records = try listEnvelopes(page)
+            for record in records {
+                let key = record.row.conversationID == 0 ? -record.row.id : record.row.conversationID
+                if seen.insert(key).inserted { newest.append(record) }
+            }
+            guard records.count == batch, let last = records.last else { break }
+            from = last.row.id
+        }
+
+        // Conversations already listed on an earlier page: a message of theirs in the view lies above the cursor.
+        var shownBefore = Set<Int64>()
+        if let cursor {
+            let conversations = Set(newest.map(\.row.conversationID).filter { $0 != 0 })
+            if !conversations.isEmpty {
+                let list = conversations.map(String.init).joined(separator: ",")
+                let above = try orderedIDs(
+                    mailboxes: plan.mailboxes,
+                    clauses: plan.clauses + [
+                        "m.conversation_id IN (\(list))",
+                        "(m.date_received > ? OR (m.date_received = ? AND m.ROWID >= ?))",
+                    ],
+                    params: [.int(cursor.date), .int(cursor.date), .int(cursor.id)],
+                    order: "", newestFirstLimit: nil, joins: "")
+                if !above.isEmpty {
+                    let marks = Array(repeating: "?", count: above.count).joined(separator: ",")
+                    try snapshot.connection.query(
+                        "SELECT DISTINCT conversation_id FROM messages WHERE ROWID IN (\(marks))",
+                        above.map(SQLiteValue.int)
+                    ) { shownBefore.insert($0.int(0)) }
+                }
+            }
+        }
+        let candidates = newest.filter { !shownBefore.contains($0.row.conversationID) }.prefix(wanted)
+        guard !candidates.isEmpty else { return [] }
+
+        let conversations = candidates.map(\.row.conversationID).filter { $0 != 0 }
+        var counts: [Int64: Int] = [:]
+        var people: [Int64: [String]] = [:]
+        if !conversations.isEmpty {
+            let list = conversations.map(String.init).joined(separator: ",")
+            try snapshot.connection.query(
+                "SELECT conversation_id, COUNT(*) FROM messages WHERE conversation_id IN (\(list)) AND +deleted = 0 GROUP BY conversation_id"
+            ) { counts[$0.int(0)] = Int($0.int(1)) }
+            try snapshot.connection.query("""
+                SELECT m.conversation_id, a.comment, a.address FROM messages m
+                LEFT JOIN addresses a ON m.sender = a.ROWID
+                WHERE m.conversation_id IN (\(list)) AND +m.deleted = 0
+                ORDER BY m.date_received DESC, m.ROWID DESC
+                """
+            ) { row in
+                let name = Self.personName(name: row.text(1), address: row.text(2))
+                let id = row.int(0)
+                var known = people[id] ?? []
+                if known.count < 3, !known.contains(name) {
+                    known.append(name)
+                    people[id] = known
+                }
+            }
+        }
+        return candidates.map { record in
+            let id = record.row.conversationID
+            if id == 0 {
+                return ConversationRecord(
+                    newest: record, count: 1,
+                    participants: [Self.personName(name: record.row.fromName, address: record.row.fromAddr)])
+            }
+            return ConversationRecord(
+                newest: record, count: counts[id] ?? 1,
+                participants: people[id] ?? [Self.personName(name: record.row.fromName, address: record.row.fromAddr)])
+        }
+    }
+
+    private static func personName(name: String?, address: String?) -> String {
+        if let name, !name.isEmpty { return name }
+        return address ?? "(unknown)"
+    }
+
+    // MARK: - Links
+
+    /// The message a link points at: the row id when it still holds that message, else the message with the same
+    /// Message-ID (a copy under `preferMailbox` first, else the newest that isn't deleted).
+    public func resolve(_ link: MessageLink, preferMailbox: Int64? = nil) throws -> EnvelopeRecord {
+        if let record = try envelopeRecord(id: link.rowid) {
+            guard let mid = link.messageID else { return record }
+            if record.row.messageID.flatMap(MessageLink.stripBrackets) == mid { return record }
+        }
+        guard let mid = link.messageID, capabilities.hasMessageIDHeader else {
+            throw Mail42Error.notFound("message \(link.rowid)")
+        }
+        var ids: [Int64] = []
+        try snapshot.connection.query("""
+            SELECT m.ROWID FROM message_global_data g JOIN messages m ON m.global_message_id = g.ROWID
+            WHERE g.message_id_header IN (?, ?) AND m.deleted = 0 ORDER BY m.date_received DESC, m.ROWID DESC
+            """, [.text(mid), .text("<\(mid)>")]
+        ) { ids.append($0.int(0)) }
+        guard !ids.isEmpty else { throw Mail42Error.notFound("message \(link.rowid) (Message-ID \(mid))") }
+
+        var chosen = ids[0]
+        if let preferMailbox, ids.count > 1 {
+            let marks = Array(repeating: "?", count: ids.count).joined(separator: ",")
+            var inMailbox = Set<Int64>()
+            try snapshot.connection.query(
+                "SELECT ROWID FROM messages WHERE ROWID IN (\(marks)) AND mailbox = ?",
+                ids.map(SQLiteValue.int) + [.int(preferMailbox)]
+            ) { inMailbox.insert($0.int(0)) }
+            if hasLabels {
+                try snapshot.connection.query(
+                    "SELECT message_id FROM labels WHERE message_id IN (\(marks)) AND mailbox_id = ?",
+                    ids.map(SQLiteValue.int) + [.int(preferMailbox)]
+                ) { inMailbox.insert($0.int(0)) }
+            }
+            if let first = ids.first(where: inMailbox.contains) { chosen = first }
+        }
+        guard let record = try envelopeRecord(id: chosen) else { throw Mail42Error.notFound("message \(chosen)") }
+        return record
     }
 
     /// A search's results, and a note when it could not cover every message.

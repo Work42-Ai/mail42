@@ -18,7 +18,7 @@ enum EnvelopeCommand {
         case "list": list(args: args, json: json)
         case "search": search(args: args, words: words, json: json)
         default:
-            CLI.usageError("usage: envelope list [-m <mailbox>] … | envelope search \"<query>\" [--limit N]", json: json)
+            CLI.usageError("usage: envelope list [-m <mailbox>] [--conversations] … | envelope search \"<query>\" [--limit N]", json: json)
         }
     }
 
@@ -43,7 +43,12 @@ enum EnvelopeCommand {
             }
         }
         do {
-            show(try LiveMail.open().listEnvelopes(options), json: json)
+            let mail = try LiveMail.open()
+            if args.contains("--conversations") {
+                showConversations(try mail.listConversations(options), json: json)
+            } else {
+                show(try mail.listEnvelopes(options), json: json)
+            }
         } catch {
             CLI.fail(error: error, json: json)
         }
@@ -69,6 +74,14 @@ enum EnvelopeCommand {
     }
 
     // MARK: - output
+
+    static func showConversations(_ conversations: [ConversationRecord], json: Bool) {
+        if json {
+            CLI.emitJSONObject(conversations.map(Presentation.conversation))
+        } else {
+            Presentation.printEnvelopeTable(conversations.map(\.newest))
+        }
+    }
 
     static func show(_ records: [EnvelopeRecord], json: Bool) {
         if json {

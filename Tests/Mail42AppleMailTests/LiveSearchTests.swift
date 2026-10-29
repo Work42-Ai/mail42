@@ -123,8 +123,12 @@ import Mail42TestSupport
         #expect(try ids("date:2w") == [10, 11, 12, 13, 16])                   // "2w" = "2w.."
         #expect(try ids("date:..2000-01-01") == [])
         #expect(try ids("date:2000-01-01..2000-01-31") == [])
-        let today = ISO8601DateFormatter().string(from: Date()).prefix(10)
-        let tomorrow = ISO8601DateFormatter().string(from: Date().addingTimeInterval(86_400)).prefix(10)
+        // Dates in a query are the user's local days, so the test must name them in local time too (not UTC, which is
+        // already "tomorrow" for part of every evening west of Greenwich).
+        let local = DateFormatter()
+        local.dateFormat = "yyyy-MM-dd"
+        let today = local.string(from: Date())
+        let tomorrow = local.string(from: Date().addingTimeInterval(86_400))
         #expect(try ids("date:\(today)..\(tomorrow) is:flagged") == [12])
     }
 

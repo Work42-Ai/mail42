@@ -2,7 +2,9 @@
 // for people. JSON is built from dictionaries so an absent value is an explicit `null` (stable keys).
 //
 //   Envelope  {id, message_id, conversation_id, account{id,name,email}, mailbox{id,name,role}, from{name,addr},
-//              to[{name,addr}], cc[…], subject, date (ISO-8601), snippet, is_read, is_flagged, has_attachments}
+//              to[{name,addr}], cc[…], subject, date (ISO-8601), snippet, is_read, is_flagged, has_attachments,
+//              link (mail42://message/<id>?mid=<Message-ID>)}
+//   Conversation  an Envelope (the newest message in the view) plus conversation_count and participants[]
 //   Message   {envelope, headers{}, text, html, attachments[{part,filename,mime,size}], body_unavailable}
 
 import Foundation
@@ -39,7 +41,16 @@ enum Presentation {
             "is_read": row.isRead,
             "is_flagged": row.isFlagged,
             "has_attachments": row.hasAttachments,
+            "link": r.link.string,
         ]
+    }
+
+    /// An envelope plus the size of its conversation and who is in it.
+    static func conversation(_ c: ConversationRecord) -> [String: Any] {
+        var dictionary = envelope(c.newest)
+        dictionary["conversation_count"] = c.count
+        dictionary["participants"] = c.participants
+        return dictionary
     }
 
     static func attachment(_ a: AttachmentRow) -> [String: Any] {
