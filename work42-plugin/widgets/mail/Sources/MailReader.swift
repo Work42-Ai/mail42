@@ -36,14 +36,14 @@ private struct MailMessageHeader: View {
     let model: MailModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DT.s8) {
+        VStack(alignment: .leading, spacing: DT.s12) {
             Text(envelope.subject.isEmpty ? "(no subject)" : envelope.subject)
                 .font(.system(size: DT.f14, weight: .semibold))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(alignment: .top, spacing: DT.s8) {
                 MailAvatar(person: envelope.from)
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text(envelope.from.display).font(.system(size: DT.f12, weight: .semibold))
                         if let addr = envelope.from.addr, addr != envelope.from.display {
@@ -81,8 +81,8 @@ private struct MailMessageHeader: View {
                 }
             }
         }
-        .padding(.horizontal, DT.s12)
-        .padding(.vertical, DT.s8)
+        .padding(.horizontal, DT.s20)
+        .padding(.vertical, DT.s12)
     }
 }
 

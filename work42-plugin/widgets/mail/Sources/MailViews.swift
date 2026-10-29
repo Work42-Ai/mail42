@@ -189,10 +189,11 @@ private struct MailListPane: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, DT.s8)
-            .padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(DT.chipFill))
-            .padding(DT.s8)
+            .padding(.horizontal, DT.s12)
+            .padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(DT.chipFill))
+            .padding(.horizontal, DT.s12)
+            .padding(.vertical, DT.s12)
             .onChange(of: text) { _, _ in push() }
 
             Divider().opacity(0.4)
@@ -250,13 +251,13 @@ private struct MailRow: View, Equatable {
     let selected: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
+        HStack(alignment: .top, spacing: 10) {
             Circle()
                 .fill(envelope.isRead ? Color.clear : Color.accentColor)
-                .frame(width: 7, height: 7)
+                .frame(width: 8, height: 8)
                 .padding(.top, 5)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 4) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
                     Text(envelope.from.display)
                         .font(.system(size: DT.f11, weight: envelope.isRead ? .regular : .semibold))
                         .lineLimit(1)
@@ -273,8 +274,8 @@ private struct MailRow: View, Equatable {
                 }
             }
         }
-        .padding(.horizontal, DT.s8)
-        .padding(.vertical, 7)
+        .padding(.horizontal, DT.s12)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(selected ? Color.accentColor.opacity(0.16) : Color.clear)
     }
