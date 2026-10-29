@@ -87,17 +87,23 @@ public struct MailActions: Sendable {
 
     // MARK: - State
 
-    public func mark(_ message: MessageRef, as state: MarkState) throws {
-        let body: String
+    /// - Returns: what Mail itself says about the message afterwards (`subject | read | flagged`), so a caller can
+    ///   see that the right message was changed.
+    @discardableResult
+    public func mark(_ message: MessageRef, as state: MarkState) throws -> String {
+        var body: String
         switch state {
-        case .read: body = "set read status of theMessage to true"
-        case .unread: body = "set read status of theMessage to false"
-        case .unflagged: body = "set flagged status of theMessage to false"
+        // `tell theMessage to set …`, not `set … of theMessage to …`: with a message found by id, Mail accepts the
+        // second form and silently changes nothing (checked on a real mailbox; it reports the old value back).
+        case .read: body = "tell theMessage to set read status to true"
+        case .unread: body = "tell theMessage to set read status to false"
+        case .unflagged: body = "tell theMessage to set flagged status to false"
         case .flagged(let color):
-            body = "set flagged status of theMessage to true"
-                + (color.map { "\nset flag index of theMessage to \($0.index)" } ?? "")
+            body = "tell theMessage to set flagged status to true"
+                + (color.map { "\ntell theMessage to set flag index to \($0.index)" } ?? "")
         }
-        _ = try runner.run(Self.script(for: message, body: body))
+        body += "\nreturn (subject of theMessage) & \" | read=\" & (read status of theMessage as text) & \" | flagged=\" & (flagged status of theMessage as text)"
+        return try runner.run(Self.script(for: message, body: body))
     }
 
     // MARK: - Location
@@ -121,7 +127,7 @@ public struct MailActions: Sendable {
 
     /// Marks the message as junk and, when the account's junk mailbox is known, moves it there.
     public func junk(_ message: MessageRef, junkPath: [String]?) throws {
-        var body = "set junk mail status of theMessage to true"
+        var body = "tell theMessage to set junk mail status to true"
         if let junkPath {
             body += "\nmove theMessage to \(AppleScript.mailbox(account: message.accountName, path: junkPath))"
         }

@@ -23,11 +23,11 @@ import Mail42TestSupport
         #expect(run.object?["link"] as? String == "mail42://message/10?mid=plain-1%40example.com")
         let script = try #require(scripts(run).first)
         #expect(script.contains("account \"yan@example.com\"") && script.contains("mailbox \"INBOX\""))
-        #expect(script.contains("«class mssg» id 10 of theBox") && script.contains("set read status of theMessage to true"))
+        #expect(script.contains("«class mssg» id 10 of theBox") && script.contains("tell theMessage to set read status to true"))
 
         let flagged = try cli.run(["mark", "10", "flagged", "--color", "purple", "--json"], f)
-        #expect(scripts(flagged).first?.contains("set flag index of theMessage to 5") == true)
-        #expect(try cli.run(["mark", "10", "unread"], f).out.contains("set read status of theMessage to false"))
+        #expect(scripts(flagged).first?.contains("tell theMessage to set flag index to 5") == true)
+        #expect(try cli.run(["mark", "10", "unread"], f).out.contains("tell theMessage to set read status to false"))
     }
 
     @Test func aLinkNamesTheMessageToo() throws {
@@ -69,7 +69,7 @@ import Mail42TestSupport
         defer { f.cleanup() }
         #expect(scripts(try cli.run(["delete", "10", "--json"], f)).first?.contains("delete theMessage") == true)
         let bare = try cli.run(["junk", "10", "--json"], f)                                   // no Junk mailbox yet
-        #expect(scripts(bare).first?.contains("set junk mail status of theMessage to true") == true)
+        #expect(scripts(bare).first?.contains("tell theMessage to set junk mail status to true") == true)
         #expect(scripts(bare).first?.contains("move theMessage") == false)
         try f.mail.addMailbox(id: 4, url: EnvelopeIndexBuilder.mailboxURL(["Junk"]))
         let moved = try cli.run(["junk", "10", "--json"], f)

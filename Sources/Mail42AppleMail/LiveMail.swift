@@ -439,6 +439,22 @@ public final class LiveMail {
         return rows
     }
 
+    /// Every mailbox a message is in: where it is stored first, then the ones it is labelled with (a Gmail message is
+    /// stored in All Mail and labelled Inbox, Important…). Apple Mail's scripting knows it under each of them.
+    public func mailboxes(containing id: Int64) throws -> [MailboxRow] {
+        var ids: [Int64] = []
+        if let stored = try snapshot.connection.scalarInt("SELECT mailbox FROM messages WHERE ROWID = ?", [.int(id)]) {
+            ids.append(stored)
+        }
+        if hasLabels {
+            try snapshot.connection.query("SELECT mailbox_id FROM labels WHERE message_id = ?", [.int(id)]) {
+                let label = $0.int(0)
+                if !ids.contains(label) { ids.append(label) }
+            }
+        }
+        return ids.compactMap { mailboxByID[$0] }
+    }
+
     public func envelopeRecord(id: Int64) throws -> EnvelopeRecord? {
         try fetchRecords(mailboxes: nil, clauses: ["m.deleted = 0", "m.ROWID = ?"], params: [.int(id)], order: "").first
     }

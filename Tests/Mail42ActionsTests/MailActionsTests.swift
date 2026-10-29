@@ -60,13 +60,13 @@ private final class Recorder: ScriptRunner, @unchecked Sendable {
     // MARK: - State
 
     @Test func readUnreadAndFlagsSetMailsOwnProperties() throws {
-        #expect(try capture { try $0.mark(inbox, as: .read) }.contains("set read status of theMessage to true"))
-        #expect(try capture { try $0.mark(inbox, as: .unread) }.contains("set read status of theMessage to false"))
-        #expect(try capture { try $0.mark(inbox, as: .unflagged) }.contains("set flagged status of theMessage to false"))
+        #expect(try capture { try $0.mark(inbox, as: .read) }.contains("tell theMessage to set read status to true"))
+        #expect(try capture { try $0.mark(inbox, as: .unread) }.contains("tell theMessage to set read status to false"))
+        #expect(try capture { try $0.mark(inbox, as: .unflagged) }.contains("tell theMessage to set flagged status to false"))
         let plain = try capture { try $0.mark(inbox, as: .flagged(nil)) }
-        #expect(plain.contains("set flagged status of theMessage to true") && !plain.contains("flag index"))
+        #expect(plain.contains("tell theMessage to set flagged status to true") && !plain.contains("flag index"))
         let purple = try capture { try $0.mark(inbox, as: .flagged(.purple)) }
-        #expect(purple.contains("set flag index of theMessage to 5"))
+        #expect(purple.contains("tell theMessage to set flag index to 5"))
         #expect(FlagColor.allCases.map(\.index) == [0, 1, 2, 3, 4, 5, 6] && FlagColor.red.index == 0 && FlagColor.gray.index == 6)
     }
 
@@ -79,10 +79,10 @@ private final class Recorder: ScriptRunner, @unchecked Sendable {
             .contains("move theMessage to mailbox \"All Mail\" of mailbox \"[Gmail]\" of account \"Google\""))
         #expect(try capture { try $0.delete(inbox) }.contains("delete theMessage"))
         let junk = try capture { try $0.junk(inbox, junkPath: ["Junk"]) }
-        #expect(junk.contains("set junk mail status of theMessage to true"))
+        #expect(junk.contains("tell theMessage to set junk mail status to true"))
         #expect(junk.contains("move theMessage to mailbox \"Junk\" of account \"Google\""))
         let bare = try capture { try $0.junk(inbox, junkPath: nil) }
-        #expect(bare.contains("set junk mail status of theMessage to true") && !bare.contains("move theMessage"))
+        #expect(bare.contains("tell theMessage to set junk mail status to true") && !bare.contains("move theMessage"))
     }
 
     @Test func archivingWithoutAnArchiveMailboxSaysSo() {

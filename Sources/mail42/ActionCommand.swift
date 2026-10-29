@@ -76,17 +76,18 @@ enum ActionCommand {
         default:
             CLI.usageError("mark takes read, unread, flagged or unflagged, not `\(words[1])`", json: json)
         }
-        let (_, record) = try target(words.first, json: json)
-        try actions.mark(MessageRef(record: record), as: state)
+        let (mail, record) = try target(words.first, json: json)
+        let says = try actions.mark(scriptingRef(record, in: mail), as: state)
         finish(action: "mark", record: record, link: record.link, recorder: recorder, json: json,
-               text: "Marked message \(record.row.id) as \(words[1].lowercased()).")
+               text: "Marked message \(record.row.id) as \(words[1].lowercased()).",
+               extra: says.isEmpty ? [:] : ["mail_says": says])
     }
 
     private static func move(_ words: [String], _ actions: MailActions, _ recorder: ScriptRecorder, _ json: Bool) throws {
         guard words.count >= 2 else { CLI.usageError("usage: move <id|link> <mailbox id|name>", json: json) }
         let (mail, record) = try target(words.first, json: json)
         let box = try mailbox(matching: words[1], in: mail, for: record)
-        try actions.move(MessageRef(record: record), toMailbox: path(of: box))
+        try actions.move(scriptingRef(record, in: mail), toMailbox: path(of: box))
         finish(action: "move", record: record, link: settledLink(record, mail: mail, preferring: box.id), recorder: recorder, json: json,
                text: "Moved message \(record.row.id) to \(box.name).")
     }
@@ -95,14 +96,14 @@ enum ActionCommand {
         let (mail, record) = try target(words.first, json: json)
         let box = accountMailboxes(of: record, in: mail).filter { $0.role == "archive" }
             .sorted { ($0.name.hasPrefix("[Gmail]") ? 0 : 1) < ($1.name.hasPrefix("[Gmail]") ? 0 : 1) }.first
-        try actions.archive(MessageRef(record: record), archivePath: box.map(path(of:)))
+        try actions.archive(scriptingRef(record, in: mail), archivePath: box.map(path(of:)))
         finish(action: "archive", record: record, link: settledLink(record, mail: mail, preferring: box?.id), recorder: recorder, json: json,
                text: "Archived message \(record.row.id).")
     }
 
     private static func delete(_ words: [String], _ actions: MailActions, _ recorder: ScriptRecorder, _ json: Bool) throws {
         let (mail, record) = try target(words.first, json: json)
-        try actions.delete(MessageRef(record: record))
+        try actions.delete(scriptingRef(record, in: mail))
         let trash = accountMailboxes(of: record, in: mail).first { $0.role == "trash" }
         finish(action: "delete", record: record, link: settledLink(record, mail: mail, preferring: trash?.id), recorder: recorder, json: json,
                text: "Moved message \(record.row.id) to the Trash.")
@@ -111,7 +112,7 @@ enum ActionCommand {
     private static func junk(_ words: [String], _ actions: MailActions, _ recorder: ScriptRecorder, _ json: Bool) throws {
         let (mail, record) = try target(words.first, json: json)
         let box = accountMailboxes(of: record, in: mail).first { $0.role == "junk" }
-        try actions.junk(MessageRef(record: record), junkPath: box.map(path(of:)))
+        try actions.junk(scriptingRef(record, in: mail), junkPath: box.map(path(of:)))
         finish(action: "junk", record: record, link: settledLink(record, mail: mail, preferring: box?.id), recorder: recorder, json: json,
                text: "Marked message \(record.row.id) as junk.")
     }
@@ -127,8 +128,8 @@ enum ActionCommand {
             finish(action: "draft new", record: nil, link: nil, recorder: recorder, json: json,
                    text: "Opened a new message in Mail. Nothing is sent until you press Send there.")
         case "reply", "reply-all", "forward":
-            let (_, record) = try target(words.dropFirst().first, json: json)
-            let ref = MessageRef(record: record)
+            let (mail, record) = try target(words.dropFirst().first, json: json)
+            let ref = try scriptingRef(record, in: mail)
             if kind == "forward" { try actions.draftForward(ref) } else { try actions.draftReply(ref, all: kind == "reply-all") }
             finish(action: "draft \(kind)", record: record, link: record.link, recorder: recorder, json: json,
                    text: "Opened a \(kind) draft in Mail. Nothing is sent until you press Send there.")
@@ -146,6 +147,18 @@ enum ActionCommand {
         }
         let mail = try LiveMail.open()
         return (mail, try mail.resolve(link))
+    }
+
+    /// The message as Mail's scripting knows it. A Gmail message is stored in All Mail but lives in Mail under its
+    /// labels too; act on it where Mail shows it (its Inbox when it has one), which is also a far smaller mailbox
+    /// to look in than the 160,000-message All Mail.
+    private static func scriptingRef(_ record: EnvelopeRecord, in mail: LiveMail) throws -> MessageRef {
+        var ref = MessageRef(record: record)
+        let boxes = try mail.mailboxes(containing: record.row.id)
+        if let chosen = boxes.first(where: { $0.role == "inbox" }) ?? boxes.first {
+            ref.mailboxPath = path(of: chosen)
+        }
+        return ref
     }
 
     private static func accountMailboxes(of record: EnvelopeRecord, in mail: LiveMail) -> [MailboxRow] {
@@ -183,10 +196,11 @@ enum ActionCommand {
     // MARK: - Output
 
     private static func finish(
-        action: String, record: EnvelopeRecord?, link: MessageLink?, recorder: ScriptRecorder, json: Bool, text: String
+        action: String, record: EnvelopeRecord?, link: MessageLink?, recorder: ScriptRecorder, json: Bool, text: String,
+        extra: [String: Any] = [:]
     ) {
         if json {
-            var result: [String: Any] = ["ok": true, "action": action]
+            var result: [String: Any] = ["ok": true, "action": action].merging(extra) { first, _ in first }
             if let record { result["id"] = record.row.id }
             if let link { result["link"] = link.string }
             if dryRun { result["dry_run"] = true; result["scripts"] = recorder.recorded }
