@@ -324,17 +324,32 @@ public final class LiveMail {
         public var note: String?
     }
 
-    private static let searchJoins = "LEFT JOIN subjects s ON s.ROWID = m.subject LEFT JOIN addresses a ON a.ROWID = m.sender"
+    /// The tables a search compares against: subject, sender and (when this Mail has them) the one-line preview.
+    private var searchJoins: String {
+        "LEFT JOIN subjects s ON s.ROWID = m.subject LEFT JOIN addresses a ON a.ROWID = m.sender"
+            + (capabilities.hasSummary ? " LEFT JOIN summaries sm ON sm.ROWID = m.summary" : "")
+    }
 
     /// Messages matching a search query (`from:alice is:unread date:2w.. invoice`), newest first.
     ///
     /// Everything but message text is answered from Apple's index. Words and `body:` need the text, which Apple's
     /// index doesn't hold: those read the newest messages that match the rest of the query (within `scan`'s limits)
     /// and the outcome's `note` says so when that wasn't all of them.
-    public func search(_ query: String, limit: Int, scan: ScanLimits = .standard) throws -> SearchOutcome {
+    ///
+    /// What the headers settle (subject, sender, recipients, dates, state) is answered first from the index, instantly and
+    /// completely. Only then are messages read, and only those that could still add a result: when the headers already
+    /// fill `limit`, only messages newer than the oldest of them (an older match could never displace it).
+    ///
+    /// - Parameter headersOnly: stop after the first step: what the headers alone find (the tile shows this at once,
+    ///   then replaces it with the full answer). Empty for a query that can't be settled by headers (a word under `not`).
+    public func search(
+        _ query: String, limit: Int, scan: ScanLimits = .standard, headersOnly: Bool = false
+    ) throws -> SearchOutcome {
         let rows = mailboxRows
         func compiler(_ matches: [String: Set<Int64>]?) -> QueryCompiler {
-            QueryCompiler(mailboxIDs: { Self.mailboxIDs(matching: $0, in: rows) }, textMatches: matches)
+            QueryCompiler(
+                mailboxIDs: { Self.mailboxIDs(matching: $0, in: rows) }, textMatches: matches,
+                summaries: capabilities.hasSummary)
         }
         let order = "ORDER BY m.date_received DESC, m.ROWID DESC LIMIT \(max(limit, 0))"
 
@@ -342,15 +357,38 @@ public final class LiveMail {
         guard !relaxed.textTerms.isEmpty else {
             let records = try fetchRecords(
                 mailboxes: nil, clauses: ["m.deleted = 0", relaxed.whereSQL], params: relaxed.params,
-                order: order, joins: Self.searchJoins)
+                order: order, joins: searchJoins)
             return SearchOutcome(records: records, note: nil)
         }
 
-        // 1. The newest messages that pass everything that doesn't need their text.
+        // 1. What the headers alone settle: exact (for a query with no word under `not`) and instant.
+        var headerRecords: [EnvelopeRecord] = []
+        var cutoff: (date: Int64, id: Int64)?
+        if !relaxed.hasNegatedText {
+            let headers = try compiler([:]).compile(query)            // every text test false: a subset of the answer
+            headerRecords = try fetchRecords(
+                mailboxes: nil, clauses: ["m.deleted = 0", headers.whereSQL], params: headers.params,
+                order: order, joins: searchJoins)
+            if headersOnly || limit <= 0 { return SearchOutcome(records: headerRecords, note: nil) }
+            if headerRecords.count >= limit, let last = headerRecords.last {
+                cutoff = (last.row.dateReceived, last.row.id)         // an older text match can't displace these
+            }
+        } else if headersOnly {
+            return SearchOutcome(records: [], note: nil)
+        }
+        let known = Set(headerRecords.map(\.row.id))
+
+        // 2. The newest other messages that pass everything that doesn't need their text, to read.
+        var candidateClauses = ["m.deleted = 0", relaxed.whereSQL]
+        var candidateParams = relaxed.params
+        if let cutoff {
+            candidateClauses.append("(m.date_received > ? OR (m.date_received = ? AND m.ROWID > ?))")
+            candidateParams += [.int(cutoff.date), .int(cutoff.date), .int(cutoff.id)]
+        }
         let found = try orderedIDs(
-            mailboxes: nil, clauses: ["m.deleted = 0", relaxed.whereSQL], params: relaxed.params,
-            order: "ORDER BY m.date_received DESC, m.ROWID DESC LIMIT \(scan.maxMessages + 1)",
-            newestFirstLimit: nil, joins: Self.searchJoins)
+            mailboxes: nil, clauses: candidateClauses, params: candidateParams,
+            order: "ORDER BY m.date_received DESC, m.ROWID DESC LIMIT \(scan.maxMessages + known.count + 1)",
+            newestFirstLimit: nil, joins: searchJoins).filter { !known.contains($0) }
         let moreExist = found.count > scan.maxMessages
         let candidates = Array(found.prefix(scan.maxMessages))
 
@@ -363,13 +401,13 @@ public final class LiveMail {
             let read = scanned.map(String.init).joined(separator: ",")
             return try fetchRecords(
                 mailboxes: nil, clauses: ["m.deleted = 0", "m.ROWID IN (\(read))", final.whereSQL], params: final.params,
-                order: order, joins: Self.searchJoins)
+                order: order, joins: searchJoins)
         }
 
         let deadline = Date().addingTimeInterval(scan.timeLimit)
         var matches: [String: Set<Int64>] = [:]
         var scanned = Set<Int64>()
-        var records: [EnvelopeRecord] = []
+        var records = headerRecords
         var satisfied = false, outOfTime = false
         var start = 0
         while start < candidates.count, limit > 0 {
@@ -383,10 +421,17 @@ public final class LiveMail {
             for (term, ids) in read.matches { matches[term, default: []].formUnion(ids) }
             start += chunk.count
             if read.scanned.count < chunk.count { outOfTime = true; break }
-            records = try results(matches, scanned)
-            if records.count >= limit { satisfied = true; break }
+            records = Self.merge(headerRecords, try results(matches, scanned), limit: limit)
+            // Candidates are read newest first, so nothing left can be newer than the next one: once `limit` results
+            // are all newer than it, reading more cannot change the answer.
+            if records.count >= limit, start < found.count,
+               let next = try dateReceived(of: found[start]), let worst = records.last?.row.dateReceived,
+               worst > next {
+                satisfied = true
+                break
+            }
         }
-        if !satisfied { records = try results(matches, scanned) }
+        if !satisfied { records = Self.merge(headerRecords, try results(matches, scanned), limit: limit) }
 
         // 3. Say so when the answer might be missing older messages.
         var note: String?
@@ -405,6 +450,19 @@ public final class LiveMail {
 
     /// How many messages a text search reads before checking whether it already has enough results.
     private static let scanChunk = 500
+
+    /// The newest `limit` of two result sets, each message once.
+    private static func merge(_ first: [EnvelopeRecord], _ second: [EnvelopeRecord], limit: Int) -> [EnvelopeRecord] {
+        var seen = Set<Int64>()
+        let all = (first + second).sorted {
+            $0.row.dateReceived != $1.row.dateReceived ? $0.row.dateReceived > $1.row.dateReceived : $0.row.id > $1.row.id
+        }
+        return Array(all.filter { seen.insert($0.row.id).inserted }.prefix(max(limit, 0)))
+    }
+
+    private func dateReceived(of id: Int64) throws -> Int64? {
+        try snapshot.connection.scalarInt("SELECT date_received FROM messages WHERE ROWID = ?", [.int(id)])
+    }
 
     /// Where Mail keeps each message's file (nil when it has none), in the order of `ids`.
     private func emlxFiles(for ids: [Int64]) throws -> [(id: Int64, file: URL?)] {

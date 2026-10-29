@@ -90,6 +90,7 @@ mail42 envelope list --conversations          # one row per conversation (conver
 mail42 envelope list -m flagged --unread      # -m: all | flagged | <mailbox id> | <name or role>
 mail42 envelope list --limit 20 --before 4211 # next page: pass the last id you saw
 mail42 envelope search 'from:alice is:unread date:2w..'
+mail42 envelope search 'alice' --headers      # instant: subject, sender name/address, recipients, Apple's preview line only
 mail42 message read 4211                      # plain text; --html = sanitised HTML; --headers
 mail42 message read 4211 --html --out /tmp/m.html   # write to a file, print the path
 mail42 message thread 4211                    # the whole conversation (every mailbox), oldest first

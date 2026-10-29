@@ -31,9 +31,12 @@ struct MailBody: View {
                 }
             case .ready:
                 MailSplit(model: model, services: services)
+                    .transition(.opacity.combined(with: .scale(scale: 0.985)))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Loading → ready (or into setup) settles in instead of snapping.
+        .animation(.spring(response: 0.45, dampingFraction: 0.88), value: model.state)
         .task { model.start(services: services) }
         .onDisappear { model.stop() }
         // A switch flipped in System Settings shows up as soon as the user is back.
@@ -153,6 +156,7 @@ private struct MailSplit: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 4)
                     .background(DT.chipFill)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
             HStack(spacing: 0) {
                 MailListPane(model: model)
@@ -161,6 +165,7 @@ private struct MailSplit: View {
                 MailReaderPane(model: model, services: services)
             }
         }
+        .animation(.easeOut(duration: 0.25), value: model.notice)
         .background { MailShortcuts(model: model) }
     }
 }

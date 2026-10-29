@@ -37,6 +37,15 @@ import Mail42TestSupport
         #expect(BodyScanner.rawCandidates(in: data, wanted: wanted("relevant")) == ["relevant"])
     }
 
+    @Test func onlyTheStartOfAHugeFileIsLookedAt() throws {
+        // A word past the first 256 KB (inside a big attachment, say) is not worth copying the whole file for.
+        let padding = String(repeating: "x", count: BodyScanner.rawReadLimit + 1000)
+        let late = MailFixtures.emlx(message(headers: ["Content-Type: text/plain"], body: padding + " lateword"))
+        #expect(BodyScanner.rawCandidates(in: late, wanted: wanted("lateword")) == [])
+        let early = MailFixtures.emlx(message(headers: ["Content-Type: text/plain"], body: "earlyword " + padding))
+        #expect(BodyScanner.rawCandidates(in: early, wanted: wanted("earlyword")) == ["earlyword"])
+    }
+
     @Test func aWordSplitByAQuotedPrintableLineBreakIsStillFound() throws {
         let body = "This is the inv=\r\noice you asked for, and a long line that Mail would have wrapped here."
         let (url, cleanup) = try file(message(headers: ["Content-Type: text/plain; charset=utf-8",

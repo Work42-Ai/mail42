@@ -15,7 +15,7 @@ struct MailListPane: View {
         VStack(spacing: 0) {
             HStack(spacing: DT.s8) {
                 Image(systemName: "magnifyingglass").font(.system(size: DT.f12)).foregroundStyle(.secondary)
-                TextField("Search mail  (from:  is:unread  date:2w..)", text: $text)
+                TextField("Search name, email or subject", text: $text)
                     .textFieldStyle(.plain)
                     .font(.system(size: DT.f13))
                     .onSubmit { push() }
@@ -39,16 +39,21 @@ struct MailListPane: View {
 
             Divider().opacity(0.4)
 
-            if model.envelopes.isEmpty, model.isRefreshing {
-                MailSkeletonRows()
-            } else if model.envelopes.isEmpty {
-                MailPlaceholder(
-                    symbol: "tray",
-                    title: model.query.isEmpty ? "Nothing here" : "No matches",
-                    text: model.query.isEmpty ? "No messages in this view." : "Nothing matches that search.")
-            } else {
-                MailRows(model: model)
+            Group {
+                if model.envelopes.isEmpty, model.isRefreshing {
+                    MailSkeletonRows().transition(.opacity)
+                } else if model.envelopes.isEmpty {
+                    MailPlaceholder(
+                        symbol: "tray",
+                        title: model.query.isEmpty ? "Nothing here" : "No matches",
+                        text: model.query.isEmpty ? "No messages in this view." : "Nothing matches that search.")
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                } else {
+                    MailRows(model: model).transition(.opacity)
+                }
             }
+            .animation(.easeInOut(duration: 0.22), value: model.envelopes.isEmpty)
+            .animation(.easeInOut(duration: 0.22), value: model.isRefreshing)
         }
     }
 
@@ -71,6 +76,7 @@ private struct MailRows: View {
                         ForEach(section.envelopes) { envelope in
                             MailRow(envelope: envelope, selected: envelope.id == model.selectedID)
                                 .equatable()
+                                .modifier(MailAppear())
                                 .contentShape(Rectangle())
                                 .onTapGesture { model.select(envelope.id) }
                                 .contextMenu { MailActionMenu(model: model, target: envelope) }
@@ -127,6 +133,30 @@ struct MailSkeletonRows: View {
     }
 }
 
+/// A row rises into place the first time it shows.
+struct MailAppear: ViewModifier {
+    @State private var shown = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(shown ? 1 : 0)
+            .offset(y: shown ? 0 : 10)
+            .onAppear { withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { shown = true } }
+    }
+}
+
+/// A small spring to the right while the pointer is over it (the fold chevron).
+struct MailHoverNudge: ViewModifier {
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .offset(x: hovering ? 2 : 0)
+            .animation(.spring(response: 0.25, dampingFraction: 0.6), value: hovering)
+            .onHover { hovering = $0 }
+    }
+}
+
 struct MailRow: View, Equatable {
     let envelope: MailEnvelope
     let selected: Bool
@@ -136,6 +166,8 @@ struct MailRow: View, Equatable {
             Circle()
                 .fill(envelope.isRead ? Color.clear : DT.systemAccent)
                 .frame(width: 8, height: 8)
+                .scaleEffect(envelope.isRead ? 0.2 : 1)
+                .animation(.spring(response: 0.35, dampingFraction: 0.55), value: envelope.isRead)
                 .padding(.top, 6)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
@@ -167,6 +199,7 @@ struct MailRow: View, Equatable {
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(selected ? DT.systemAccent.opacity(0.16) : Color.clear)
+        .animation(.easeOut(duration: 0.18), value: selected)
     }
 }
 

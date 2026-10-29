@@ -36,6 +36,9 @@ public struct ScanResult: Sendable {
 
 public enum BodyScanner {
 
+    /// How much of a message file is checked for a word before it is decided there's none (the first 256 KB).
+    static let rawReadLimit = 262_144
+
     /// - Parameters:
     ///   - terms: the words to look for (substring, ignoring case; accents must match).
     ///   - candidates: the messages to read, newest first; `file` is nil when Mail has no file for the message.
@@ -87,6 +90,11 @@ public enum BodyScanner {
         // Only plain ASCII words that no encoding or HTML escaping could rewrite are safe to look for in raw bytes.
         let safe: (UInt8) -> Bool = { ($0 >= 97 && $0 <= 122) || ($0 >= 48 && $0 <= 57) || $0 == 32 || $0 == 45 || $0 == 46 || $0 == 64 }
         guard words.allSatisfy({ !$0.isEmpty && $0.allSatisfy(safe) }) else { return nil }
+
+        // Only the start of the file: a message's text comes first, and what follows is mostly attachments (a 20 MB
+        // PDF would otherwise be copied and lower-cased just to look for a word). A word first appearing beyond this
+        // point is not found by a search.
+        let data = data.prefix(Self.rawReadLimit)
 
         // Lower-case ASCII, and drop quoted-printable soft line breaks ("=" at the end of a line), which can split a word.
         var lower: [UInt8] = []

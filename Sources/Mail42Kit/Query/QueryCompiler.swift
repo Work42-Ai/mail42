@@ -20,6 +20,9 @@ public struct CompiledQuery: Sendable {
     public let params: [SQLiteValue]
     /// The distinct words the query wants found inside messages (free words and `body:` values).
     public let textTerms: [String]
+    /// True when a word is used under `not`. Then "which messages match by their headers alone" is no longer a subset
+    /// of the real answer (a message whose BODY has the word must be excluded), so it can't be shown early.
+    public let hasNegatedText: Bool
 }
 
 public struct QueryCompiler {
@@ -30,24 +33,30 @@ public struct QueryCompiler {
     private let mailboxIDs: @Sendable (String) -> [Int64]
     /// For each text term, the ids of the messages whose text contains it. Nil = compile the relaxed superset.
     private let textMatches: [String: Set<Int64>]?
+    /// Whether the statement joins Apple's one-line message preview as `sm`, so a plain word can match it too.
+    private let summaries: Bool
 
     /// - Parameter textMatches: nil compiles the relaxed form used to pick messages to scan; a table compiles the
     ///   real query, with every text test answered from it.
+    /// - Parameter summaries: the statement has `LEFT JOIN summaries sm`; a plain word then also matches the preview
+    ///   line Apple Mail keeps of each message (the start of its text), which the index can answer instantly.
     public init(
         now: Date = Date(), calendar: Calendar = .current,
         mailboxIDs: @escaping @Sendable (String) -> [Int64] = { _ in [] },
-        textMatches: [String: Set<Int64>]? = nil
+        textMatches: [String: Set<Int64>]? = nil,
+        summaries: Bool = false
     ) {
         self.now = now
         self.calendar = calendar
         self.mailboxIDs = mailboxIDs
         self.textMatches = textMatches
+        self.summaries = summaries
     }
 
     public func compile(_ node: QueryNode) throws -> CompiledQuery {
         var state = State()
         let sql = try build(node, negated: false, state: &state)
-        return CompiledQuery(whereSQL: sql, params: state.params, textTerms: state.terms)
+        return CompiledQuery(whereSQL: sql, params: state.params, textTerms: state.terms, hasNegatedText: state.negatedText)
     }
 
     /// Parses and compiles in one step.
@@ -58,6 +67,7 @@ public struct QueryCompiler {
     private struct State {
         var params: [SQLiteValue] = []
         var terms: [String] = []
+        var negatedText = false
     }
 
     // MARK: - AST
@@ -84,10 +94,12 @@ public struct QueryCompiler {
     ) throws -> String {
         switch field {
         case nil:
-            // A plain word: in the subject, the sender, a recipient or the message text.
-            return "(" + [subjectClause(value, state: &state), senderClause(value, state: &state),
-                          recipientClause(value, state: &state), textClause(value, negated: negated, state: &state)]
-                .joined(separator: " OR ") + ")"
+            // A plain word: in the subject, the sender, a recipient, the message's preview line, or the message text.
+            var clauses = [subjectClause(value, state: &state), senderClause(value, state: &state),
+                           recipientClause(value, state: &state)]
+            if summaries { clauses.append(summaryClause(value, state: &state)) }
+            clauses.append(textClause(value, negated: negated, state: &state))
+            return "(" + clauses.joined(separator: " OR ") + ")"
         case .subject?:
             return subjectClause(value, state: &state)
         case .body?:
@@ -132,6 +144,12 @@ public struct QueryCompiler {
         return "s.subject LIKE ? ESCAPE '\\'"
     }
 
+    /// Apple Mail's preview line of the message (the first lines of its text), as shown in Mail's own list.
+    private func summaryClause(_ value: String, state: inout State) -> String {
+        state.params.append(.text("%\(escapeLike(value))%"))
+        return "sm.summary LIKE ? ESCAPE '\\'"
+    }
+
     private func senderClause(_ value: String, state: inout State) -> String {
         let pattern = "%\(escapeLike(value))%"
         state.params += [.text(pattern), .text(pattern)]
@@ -153,6 +171,7 @@ public struct QueryCompiler {
     /// false where it could only exclude it, so the result is a superset of the real answer.
     private func textClause(_ value: String, negated: Bool, state: inout State) -> String {
         if !state.terms.contains(value) { state.terms.append(value) }
+        if negated { state.negatedText = true }
         guard let textMatches else { return negated ? "0" : "1" }
         let ids = textMatches[value] ?? []
         return ids.isEmpty ? "0" : "m.ROWID IN (\(ids.map(String.init).joined(separator: ",")))"

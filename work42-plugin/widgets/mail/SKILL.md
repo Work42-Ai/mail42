@@ -24,7 +24,9 @@ Nothing here ever sends.
 - **Opening a message** clears its unread dot at once and marks it read in Mail. Archive, delete, junk and move take the
   conversation out of the list and open the next one; if Mail refuses, the list is reloaded and a one-line notice says why.
 - **Search field:** at the top of the list; accepts the `mail42 envelope search` language, e.g. `from:alice is:unread
-  date:2w..`; plain words search subject, sender, recipients and the message text.
+  date:2w..`; plain words search subject, sender name and address, recipients and Apple's preview line (headers only,
+  `--headers`: complete and instant, never the full message text), always within the view you are in. A query that
+  isn't valid syntax is searched as literal words.
 - **Reader:** an avatar (the same colours as Meet42 for the same person), sender, `mailbox · account`, date, subject,
   To/Cc and a **Details** toggle; attachment cards (Quick Look, Save to Downloads); the message in Work42's theme
   (ordinary mail takes the app's font, colours and accent; designed mail, such as newsletters, stays as designed on a

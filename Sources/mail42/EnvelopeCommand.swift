@@ -64,7 +64,8 @@ enum EnvelopeCommand {
         }
         let limit = CLI.intFlag(args, "--limit", min: 1, json: json) ?? 50
         do {
-            let outcome = try LiveMail.open().search(query, limit: limit)
+            // `--headers`: only what the headers settle (instant); the full search adds what the message text finds.
+            let outcome = try LiveMail.open().search(query, limit: limit, headersOnly: args.contains("--headers"))
             show(outcome.records, json: json)
             // On stderr, so a JSON result stays a plain array: how far back the message text was searched.
             if let note = outcome.note { CLI.warn("mail42: \(note)") }

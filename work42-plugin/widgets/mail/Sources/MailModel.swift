@@ -93,7 +93,7 @@ final class MailModel {
     private(set) var services: SessionServices?
 
     private static let pageSize = 50
-    private static let searchLimit = 100
+    private static let searchLimit = 300
     private static let readerArtifactID = "mail42-reader"
     private static let keptReaders = 8
     private static let changeInterval: Duration = .seconds(6)
@@ -267,20 +267,38 @@ final class MailModel {
         }
     }
 
+    /// The typed search, kept to the view you are in (All Inboxes, Flagged, one account's Inbox) and the Unread filter.
+    private func scoped(_ text: String) -> String {
+        var combined = "(\(text))"
+        switch selection {
+        case .allInboxes: combined += " in:inbox"
+        case .flagged: combined += " is:flagged"
+        case .mailbox(let id): combined += " in:\(id)"
+        }
+        if unreadOnly { combined += " is:unread" }
+        return combined
+    }
+
+    /// Searches the headers only (subject, sender, recipients, the preview line, dates, state): the answer is complete
+    /// and instant. Reading the text of 160,000 messages is not something a tile can wait for.
+    private func search(_ query: String) async throws -> [MailEnvelope] {
+        try await MailCLI.json(
+            [MailEnvelope].self, ["envelope", "search", query, "--headers", "--limit", String(Self.searchLimit)],
+            timeout: 30)
+    }
+
     private func fetch(limit: Int, before: Int64?) async throws -> [MailEnvelope] {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty {
-            // The filters ride along as search terms, so one query covers everything.
-            var combined = "(\(text))"
-            switch selection {
-            case .allInboxes: combined += " in:inbox"
-            case .flagged: combined += " is:flagged"
-            case .mailbox(let id): combined += " in:\(id)"
+            do {
+                return try await search(scoped(text))
+            } catch let failure as MailFailure where failure.code == "bad_query" {
+                // Not valid search syntax (a stray colon or bracket): search the words exactly as typed instead.
+                let literal = text.split(whereSeparator: \.isWhitespace)
+                    .map { "\"" + $0.replacingOccurrences(of: "\"", with: " ") + "\"" }
+                    .joined(separator: " ")
+                return try await search(scoped(literal))
             }
-            if unreadOnly { combined += " is:unread" }
-            return try await MailCLI.json(
-                [MailEnvelope].self, ["envelope", "search", combined, "--limit", String(Self.searchLimit)],
-                timeout: 30)
         }
         var arguments = ["envelope", "list", "--conversations", "--limit", String(limit)]
         switch selection {

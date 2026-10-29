@@ -162,6 +162,17 @@ import Mail42TestSupport
         #expect(try run(["message", "resolve", "--json"], f).errorCode == "usage")
     }
 
+    @Test func searchHeadersOnlyAnswersAtOnceWithoutTheMessageText() throws {
+        guard let f = try synced() else { return }
+        defer { f.cleanup() }
+        let quick = try run(["envelope", "search", "zebrafish", "--headers", "--json"], f)
+        #expect(quick.ids == [10])                                           // the subject
+        let textOnly = try run(["envelope", "search", "quokkabody", "--headers", "--json"], f)
+        #expect(textOnly.status == 0 && textOnly.ids == [])                  // only in the message text
+        #expect(try run(["envelope", "search", "quokkabody", "--json"], f).ids?.contains(10) == true)
+        #expect(try run(["help"], f).out.contains("--headers"))
+    }
+
     @Test func conversationsListsOneRowPerThread() throws {
         guard let f = try synced() else { return }
         defer { f.cleanup() }

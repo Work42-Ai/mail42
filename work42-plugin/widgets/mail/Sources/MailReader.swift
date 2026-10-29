@@ -29,12 +29,21 @@ struct MailReaderPane: View {
                         symbol: "tray", title: "This message is no longer in Mail",
                         text: "It may have been deleted, or it is in an account that isn\u{2019}t set up on this Mac.")
                 } else if model.selectedEnvelope != nil {
+                    // A different conversation slides in from the right; Back slides it away.
                     MailThread(model: model, services: services)
+                        .id(model.selectedEnvelope?.id)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .offset(x: 28)),
+                            removal: .opacity.combined(with: .offset(x: 28))))
                 } else {
                     MailEmptyReader(model: model)
+                        .transition(.opacity.combined(with: .scale(scale: 0.94)))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+            .animation(.spring(response: 0.42, dampingFraction: 0.84), value: model.selectedEnvelope?.id)
+            .animation(.spring(response: 0.42, dampingFraction: 0.84), value: model.missingMessage)
         }
     }
 }
@@ -143,8 +152,11 @@ private struct MailThread: View {
                 if openIndex > 0 { folded(Array(messages[..<openIndex])) }
                 MailOpenMessage(model: model, services: services, envelope: messages[openIndex])
                     .frame(maxHeight: .infinity)
+                    .id(messages[openIndex].id)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
                 if openIndex < messages.count - 1 { folded(Array(messages[(openIndex + 1)...])) }
             }
+            .animation(.spring(response: 0.38, dampingFraction: 0.86), value: model.expandedID)
         } else {
             // Everything folded: the whole conversation as rows.
             ScrollView {
@@ -163,8 +175,11 @@ private struct MailThread: View {
         ScrollView {
             VStack(spacing: 0) {
                 ForEach(messages) { message in
-                    MailCollapsedRow(model: model, envelope: message)
-                    Divider().opacity(0.3)
+                    VStack(spacing: 0) {
+                        MailCollapsedRow(model: model, envelope: message)
+                        Divider().opacity(0.3)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
         }
@@ -185,6 +200,7 @@ private struct MailCollapsedRow: View {
                     .font(.system(size: DT.f10, weight: .semibold))
                     .foregroundStyle(.tertiary)
                     .frame(width: 10)
+                    .modifier(MailHoverNudge())
                 Circle()
                     .fill(envelope.isRead ? Color.clear : DT.systemAccent)
                     .frame(width: 7, height: 7)

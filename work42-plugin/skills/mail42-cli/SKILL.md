@@ -33,7 +33,7 @@ new id when it moves it (archive, move); a link carries the Message-ID too, so i
 | One row per conversation | `mail42 envelope list --conversations --json` (adds `conversation_count`, `participants`) |
 | One mailbox / flagged / unread | `mail42 envelope list -m <mailbox-id\|name\|all\|flagged> [--unread] --json` |
 | Next page | add `--before <last id>` |
-| Search | `mail42 envelope search "from:alice is:unread date:2w.." --json` |
+| Search | `mail42 envelope search "from:alice is:unread date:2w.." --json` (plain words also read message text, slower; add `--headers` to match only subject, sender, recipients and Apple's preview line, instantly) |
 | Read (plain text) | `mail42 message read <id> --json` |
 | Read headers / HTML | `mail42 message read <id> --headers` / `--html --out file.html` |
 | Whole conversation (every mailbox, Sent included) | `mail42 message thread <id> --json` |

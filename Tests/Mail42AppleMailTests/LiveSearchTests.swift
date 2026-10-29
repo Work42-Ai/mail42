@@ -177,6 +177,51 @@ import Mail42TestSupport
         #expect(missed.note != nil)                                            // an empty answer is flagged as partial
     }
 
+    // MARK: - Headers first
+
+    @Test func whatTheHeadersSettleIsFoundWithoutReadingAnyMessage() throws {
+        // maxMessages 0 = no message text may be read at all: header matches must still all be there.
+        let none = ScanLimits(maxMessages: 0)
+        #expect(try ids("zebrafish", scan: none) == [10])                         // subject
+        #expect(try ids("qa-attach", scan: none) == [12])                         // sender
+        #expect(try ids("example", limit: 3, scan: none) == [10, 11, 12])          // sender/recipient domain, newest first
+        #expect(try ids("zebrafish or xylophone", scan: none) == [10, 13])
+    }
+
+    @Test func aHeaderMatchIsNeverDroppedBecauseTheScanRanOutOfTime() throws {
+        // Before: only messages whose text was read could be returned, so a header match the scan hadn't reached vanished.
+        let out = try outcome("zebrafish", scan: ScanLimits(maxMessages: 100, timeLimit: 0))
+        #expect(out.records.map(\.row.id) == [10])
+    }
+
+    @Test func aWordAlsoMatchesAppleMailsPreviewLineOfAMessage() throws {
+        let b = try mailbox(); defer { b.cleanup() }
+        try b.addMessage(.init(rowid: 17, subject: "hello", senderAddress: "pat@example.org", senderName: "Pat", mailboxID: 1,
+                               dateReceived: Int64(Date().timeIntervalSince1970) - 50, summary: "Quarterly lunch invitation for Friday"))
+        let mail = try LiveMail.open(library: b.library, accountsDatabase: b.root.appendingPathComponent("none.sqlite"))
+        // Instant: the preview line is in Apple's index, no message file is read.
+        #expect(try mail.search("lunch", limit: 10, headersOnly: true).records.map(\.row.id) == [17])
+        #expect(try mail.search("lunch friday", limit: 10, headersOnly: true).records.map(\.row.id) == [17])
+        #expect(try mail.search("pat", limit: 10, headersOnly: true).records.map(\.row.id) == [17])        // the sender's name
+        #expect(try mail.search("example.org", limit: 10, headersOnly: true).records.map(\.row.id).contains(17))  // the address
+        #expect(try mail.search("lunch nosuchword", limit: 10, headersOnly: true).records.isEmpty)
+    }
+
+    @Test func headersOnlyStopsBeforeTheTextSearch() throws {
+        let b = try mailbox(); defer { b.cleanup() }
+        let mail = try LiveMail.open(library: b.library, accountsDatabase: b.root.appendingPathComponent("none.sqlite"))
+        #expect(try mail.search("zebrafish", limit: 50, headersOnly: true).records.map(\.row.id) == [10])
+        #expect(try mail.search("quokkabody", limit: 50, headersOnly: true).records.isEmpty)       // text only: not yet
+        #expect(try mail.search("quokkabody", limit: 50).records.map(\.row.id) == [10, 16])        // the full search finds it
+        #expect(try mail.search("not quokkabody in:inbox", limit: 50, headersOnly: true).records.isEmpty)   // can't be settled early
+    }
+
+    @Test func headerMatchesAndTextMatchesAreMergedNewestFirst() throws {
+        // 10 matches "zebrafish" in its subject; 11 matches only in its text ("roadmap"), and is older than 10.
+        #expect(try ids("zebrafish or roadmap") == [10, 11])
+        #expect(try ids("roadmap or zebrafish", limit: 1) == [10])
+    }
+
     @Test func itStopsReadingOnceItHasEnoughResultsAndThenNeedsNoNote() throws {
         // Many candidates, a tiny read budget per search, but the first message already satisfies `limit`.
         let b = try mailbox(); defer { b.cleanup() }

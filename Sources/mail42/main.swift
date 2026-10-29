@@ -75,10 +75,11 @@ enum Dispatcher {
                 Message summaries, newest first (default: every inbox, 50 per page). Every one carries a `link`
                 (mail42://message/…). --conversations gives one row per conversation: its newest message in the view,
                 conversation_count (the whole conversation, Sent included) and participants.
-          envelope search "<query>" [--limit N] [--json]
+          envelope search "<query>" [--limit N] [--headers] [--json]
                 Search with from: to: subject: body: in: is:unread|read|flagged has:attachment
                 date:2w.. date:2026-10-01..2026-10-15, plus and / or / not and plain words.
-                Words and body: read the text of the newest matching messages (it says when that isn't all).
+                A word is found at once in the subject, sender and recipients; only then is the text of the newest
+                other messages read (and it says when that isn't all). --headers stops after the instant part.
           message read <id> [--text|--html|--headers] [--out <file>] [--json]
                 The full message: plain text by default, sanitised HTML with --html.
           message thread <id> [--json]
