@@ -14,26 +14,16 @@ owns the permissions, and the Work42 plugin in `work42-plugin/` only talks to th
 
 ## Install
 
-Ask an agent in Work42 to "set up mail42" (the `mail42-setup` skill), or install by hand from the latest release:
-
-```bash
-curl -LO https://github.com/Work42-Ai/mail42/releases/latest/download/mail42.zip
-curl -LO https://github.com/Work42-Ai/mail42/releases/latest/download/mail42.zip.sha256
-shasum -a 256 -c mail42.zip.sha256
-ditto -x -k mail42.zip ~/.work42/   # creates ~/.work42/mail42.app
-mkdir -p ~/.work42/bin && ln -sfn ~/.work42/mail42.app/Contents/MacOS/mail42 ~/.work42/bin/mail42
-```
-
-Work42 puts `~/.work42/bin` on your PATH.
+mail42 is distributed only inside [Work42](https://github.com/work42-ai/work42): there is no standalone download. The
+Work42 app embeds the signed `mail42.app`, copies it to `~/.work42/mail42.app` at launch, links the command at
+`~/.work42/bin/mail42` and updates it with the app. Work42 puts `~/.work42/bin` on your PATH. Ask an agent in Work42 to
+"set up mail42" (the `mail42-setup` skill) for the Full Disk Access walk-through.
 
 ### The Work42 plugin
 
-The plugin adds the **Mail42** widget (`widget:mail`) and two skills for agents: `mail42-setup` (install and
-permissions) and `mail42-cli` (how to read and act on mail). Install it with:
-
-```bash
-work42 plugin install https://github.com/Work42-Ai/mail42 --path work42-plugin
-```
+The plugin adds the **Mail42** widget (`widget:mail`) and two skills for agents: `mail42-setup` (check and
+permissions) and `mail42-cli` (how to read and act on mail). It is built in to Work42: the app installs it at launch, it
+can't be removed or updated on its own, and it is pinned by git tag in Work42's `BuiltInPlugins.json`.
 
 The widget only runs the `mail42` CLI; it never reads or scripts Apple Mail itself.
 
@@ -160,15 +150,19 @@ MAIL42_ACTIONS_DRY_RUN=1 mail42 archive 4211 --json   # shows the script; change
 ```
 
 `scripts/build-mail42.sh` builds the signed app bundle (ad-hoc when `DEVELOPER_ID` is unset). The Mail42 widget is built
-by Work42 itself when the plugin is installed: `work42 plugin install "$PWD" --path work42-plugin`.
+by Work42 itself: to try a checkout inside a Work42 app build, point the embed step at it with
+`WORK42_BUILTIN_MAIL42_PATH="$PWD"` (see `app/scripts/embed-builtin-plugins.sh` in the work42 repo).
 
 ## Release
+
+A release is a git tag (`v<version>`) that Work42 pins in `app/BuiltInPlugins.json`; the Work42 app build checks it out,
+builds `mail42.app` with `scripts/build-mail42.sh` and embeds it. Nothing is published as a standalone download.
+`scripts/release.sh` is the local check that a version signs, notarizes and runs:
 
 ```bash
 cp .env.release.example .env.release.local   # then fill in the Developer ID and notary profile
 scripts/release.sh 0.1.0 --check             # report readiness only
 scripts/release.sh 0.1.0                     # build, sign, notarize a candidate in dist/0.1.0/
-scripts/release.sh 0.1.0 --publish           # also create the GitHub release
 ```
 
 ## License
