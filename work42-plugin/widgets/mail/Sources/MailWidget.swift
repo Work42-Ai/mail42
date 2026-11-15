@@ -5,7 +5,6 @@
 // MailHeader), on a row's right-click, or on the keyboard. The tile itself is a conversation list beside the reader.
 // Links only Work42PluginKit + Work42UI.
 
-import AppKit
 import Observation
 import SwiftUI
 import Work42UI
@@ -78,8 +77,14 @@ final class MailWidget: Work42Widget, Work42WidgetCustomHeader {
 }
 
 
+/// A new instance of the widget, for hosts that show it without the plugin loader (the `Mail42Widgets` library).
+public func mail42MakeWidget() -> any Work42Widget { MailWidget() }
+
 // MARK: - Entry points
 
+// The dylib entry points the plugin loader calls. The library build links the widget into the iPad app, which
+// has no loader, so it leaves them out (two `work42_widget_*` symbols would clash with the next widget's).
+#if !MAIL42_WIDGETS_LIBRARY
 @_cdecl("work42_widget_sdk_version")
 public func work42_widget_sdk_version() -> Int32 { WidgetSDK.abiVersion }
 
@@ -89,3 +94,4 @@ public func work42_widget_main() -> UnsafeMutableRawPointer {
     MainActor.assumeIsolated { result = WidgetEntryPoint.register(MailWidget()) }
     return result
 }
+#endif

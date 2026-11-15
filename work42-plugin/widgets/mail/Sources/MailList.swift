@@ -2,7 +2,6 @@
 // weekday, a month). One row per conversation: its newest message, who wrote in it, and how many messages it has.
 // Right-click gives the same menu as the header's More button; ↑ ↓ move between rows and Delete deletes the open one.
 
-import AppKit
 import SwiftUI
 import Work42PluginKit
 import Work42UI

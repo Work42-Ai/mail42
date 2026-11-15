@@ -129,10 +129,13 @@ nonisolated struct MailAttachment: Codable, Equatable, Identifiable, Sendable {
 /// `mail42 message read <id> --html --out <file> --json`.
 nonisolated struct MailReadResult: Codable, Equatable, Sendable {
     let path: String?
+    /// The sanitised HTML itself, when `message read --html` was not asked to write it to a file (the iPad has no
+    /// folder the Mac could write into).
+    var html: String? = nil
     let bodyUnavailable: Bool
 
     enum CodingKeys: String, CodingKey {
-        case path
+        case path, html
         case bodyUnavailable = "body_unavailable"
     }
 }
