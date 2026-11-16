@@ -7,11 +7,13 @@
 // isn't granted yet, and otherwise re-reads the mailbox counts every few seconds and refreshes the list when
 // they move (new mail, something read or flagged elsewhere).
 
-import AppKit
 import Foundation
 import Observation
 import Work42PluginKit
 import Work42UI
+#if canImport(AppKit)
+import AppKit
+#endif
 
 enum MailSelection: Equatable, Hashable {
     case allInboxes
@@ -35,6 +37,10 @@ enum MailReaderState: Equatable {
     case loading(Int64)
     /// The sanitised HTML is on disk and reachable at `url`; `key` identifies this message's web view.
     case ready(id: Int64, url: URL, key: String)
+    #if os(iOS)
+    /// The iPad has no disk or loopback server of the Mac's to point a web view at: it is handed the page itself.
+    case readyHTML(id: Int64, html: String, key: String)
+    #endif
     /// The message has no downloaded body.
     case unavailable(Int64)
     case needsAccess
@@ -49,7 +55,9 @@ private struct ReaderEntry {
     let attachments: [MailAttachment]
     /// Which theme the page was written in; a page from another theme is written again.
     let theme: Int
-    var unavailable: Bool { file == nil }
+    /// The themed page itself (the iPad shows it from memory).
+    var html: String? = nil
+    var unavailable: Bool { file == nil && html == nil }
 }
 
 @Observable
@@ -119,6 +127,9 @@ final class MailModel {
 
     func start(services: SessionServices) {
         self.services = services
+        #if os(iOS)
+        MailCLI.remoteShell = services.shell
+        #endif
         if me == nil, let account = services.account {
             Task { [weak self] in self?.me = await account.currentUser() }
         }
@@ -442,8 +453,7 @@ final class MailModel {
         case .forward: await run(["draft", "forward", ref], failure: "Couldn't start the forward")
         case .openInMail: await run(["open", String(envelope.id)], failure: "Couldn't open the message in Mail")
         case .copyLink:
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(envelope.link ?? "mail42://message/\(envelope.id)", forType: .string)
+            services?.platform.copy(envelope.link ?? "mail42://message/\(envelope.id)")
             show("Link copied")
         case .markRead(let read): await setRead(envelope, read)
         case .flag(let color): await setFlag(envelope, color)
@@ -560,6 +570,27 @@ final class MailModel {
         _ = await MailCLI.run(["permissions", "open"], timeout: 20)
     }
 
+    #if os(iOS)
+    /// The attachment would be written on the Mac, where Quick Look is, not on this iPad.
+    func quickLook(_ attachment: MailAttachment) async {
+        show("Preview it on your Mac, or save it there")
+    }
+
+    /// Saves on the Mac (it is the Mac's mail42 that has the file), and says so.
+    func saveAttachment(_ attachment: MailAttachment) async {
+        guard let id = expandedID ?? selectedID else { return }
+        do {
+            nonisolated struct Saved: Decodable, Sendable { let path: String }
+            let saved = try await MailCLI.json(
+                Saved.self, ["attachment", "save", String(id), attachment.part, "--to", "~/Downloads"])
+            show("Saved \(URL(fileURLWithPath: saved.path).lastPathComponent) to your Mac\u{2019}s Downloads")
+        } catch let failure as MailFailure {
+            show(failure.message)
+        } catch {
+            show(error.localizedDescription)
+        }
+    }
+    #else
     /// Previews an attachment with macOS Quick Look: it is copied to a temporary folder and `qlmanage` shows it.
     func quickLook(_ attachment: MailAttachment) async {
         guard let id = expandedID ?? selectedID else { return }
@@ -595,6 +626,7 @@ final class MailModel {
             show(error.localizedDescription)
         }
     }
+    #endif
 
     private func show(_ message: String) {
         notice = message
@@ -798,8 +830,28 @@ final class MailModel {
         } else if let url = entry.url {
             reader = .ready(id: id, url: url, key: entry.key)
         }
+        #if os(iOS)
+        if let html = entry.html { reader = .readyHTML(id: id, html: html, key: entry.key) }
+        #endif
     }
 
+    #if os(iOS)
+    /// Asks the Mac's mail42 for the message with its HTML in the answer (there is no folder to write it to), and
+    /// puts it in Work42's theme.
+    private func prepare(id: Int64) async throws -> ReaderEntry {
+        let key = "\(id)-\(UUID().uuidString.prefix(8).lowercased())"
+        async let list = MailCLI.json([MailAttachment].self, ["attachment", "list", String(id)])
+        let result = try await MailCLI.json(MailReadResult.self, ["message", "read", String(id), "--html"])
+        let listed = (try? await list) ?? []
+        let tokens = CanvasTheme.tokensCSS()
+        guard !result.bodyUnavailable, let html = result.html else {
+            return ReaderEntry(file: nil, url: nil, key: "mail42:\(key)", attachments: listed, theme: tokens.hashValue)
+        }
+        let themed = await Task.detached(priority: .userInitiated) { MailBodyTheme.wrap(html, tokens: tokens) }.value
+        return ReaderEntry(
+            file: nil, url: nil, key: "mail42:\(key)", attachments: listed, theme: tokens.hashValue, html: themed)
+    }
+    #else
     /// Asks the CLI for the message (HTML to a file, attachments alongside) off the main thread.
     private func prepare(id: Int64) async throws -> ReaderEntry {
         guard let directory = readerDirectory() else {
@@ -827,6 +879,7 @@ final class MailModel {
         }
         return ReaderEntry(file: file, url: url, key: "mail42:\(key)", attachments: listed, theme: stamp)
     }
+    #endif
 
     /// Warms the next messages in the list so stepping through them is instant.
     private func prefetchNeighbors(of id: Int64) {
@@ -845,6 +898,7 @@ final class MailModel {
 
     // MARK: - The reader's files
 
+    #if os(macOS)
     // The reader's HTML lives in mail42's own folder, which is registered with the artifact server under mail42's
     // own id (a stand-in "session"). The widget therefore works in a session tab and on the session-less
     // workspace home alike (where `services.sessionId` is nil), and never fills a session's artifact gallery.
@@ -874,6 +928,7 @@ final class MailModel {
         else { return nil }
         return URL(string: base.absoluteString + fileName)
     }
+    #endif
 
     private func store(_ entry: ReaderEntry, id: Int64, becomesNewest: Bool = true) {
         readerCache[id] = entry
@@ -898,6 +953,8 @@ final class MailModel {
 
     private func dropReaderCache() {
         for id in Array(readerCache.keys) { evict(id) }
+        #if os(macOS)
         try? FileManager.default.removeItem(at: Self.readerFolder)
+        #endif
     }
 }

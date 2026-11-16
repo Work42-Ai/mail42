@@ -1,9 +1,24 @@
 // MailViews.swift — the tile: a message list on the left, the reader on the right, and the setup states.
 
-import AppKit
 import SwiftUI
 import Work42PluginKit
 import Work42UI
+#if canImport(AppKit)
+import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
+
+private extension Notification.Name {
+    /// Work42 (or the iPad app) came back to the front.
+    static var appDidBecomeActive: Notification.Name {
+        #if canImport(AppKit)
+        NSApplication.didBecomeActiveNotification
+        #else
+        UIApplication.didBecomeActiveNotification
+        #endif
+    }
+}
 
 struct MailBody: View {
     let model: MailModel
@@ -40,7 +55,7 @@ struct MailBody: View {
         .task { model.start(services: services) }
         .onDisappear { model.stop() }
         // A switch flipped in System Settings shows up as soon as the user is back.
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .appDidBecomeActive)) { _ in
             model.recheckNow()
         }
     }

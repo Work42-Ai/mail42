@@ -6,10 +6,13 @@
 // shown by the SDK's BrowserSurface with its chrome hidden. The surface owns highlight-to-comment; the resolver below
 // only labels the comment so an agent can find the message again.
 
-import AppKit
 import SwiftUI
 import Work42PluginKit
 import Work42UI
+#if os(iOS)
+import UIKit
+import WebKit
+#endif
 
 /// The height of the bar above the list (the search field) and above the reader. They are the same, so the line
 /// under them is one straight line across the tile.
@@ -378,6 +381,10 @@ private struct MailBodyView: View {
             ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
         case .ready(let id, let url, let key):
             MailWebBody(model: model, services: services, id: id, url: url, key: key)
+        #if os(iOS)
+        case .readyHTML(_, let html, let key):
+            MailHTMLBody(html: html).id(key)
+        #endif
         case .unavailable:
             MailPlaceholder(
                 symbol: "arrow.down.circle", title: "This message isn\u{2019}t downloaded",
@@ -418,6 +425,44 @@ private struct MailWebBody: View {
         .id(key)
     }
 }
+
+#if os(iOS)
+/// The message on an iPad: the Mac's sanitised HTML (no scripts, `cid:` images inlined), shown from memory. A link
+/// opens in Safari, never inside the message.
+private struct MailHTMLBody: UIViewRepresentable {
+    let html: String
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.isOpaque = false
+        view.backgroundColor = .clear
+        view.scrollView.backgroundColor = .clear
+        view.navigationDelegate = context.coordinator
+        view.loadHTMLString(html, baseURL: nil)
+        return view
+    }
+
+    func updateUIView(_ view: WKWebView, context: Context) {}
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        func webView(
+            _ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+            decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
+        ) {
+            guard action.navigationType == .linkActivated, let url = action.request.url else {
+                decisionHandler(.allow)
+                return
+            }
+            UIApplication.shared.open(url)
+            decisionHandler(.cancel)
+        }
+    }
+}
+#endif
 
 // MARK: - Small shared pieces
 
