@@ -4,13 +4,13 @@
 // human text); all diagnostics go to stderr. mail42 never writes to Apple Mail and never sends mail, and it keeps
 // no copy of the user's mail: every answer is read live from Apple Mail's own data.
 //
-// This file only gets the process into the right shape (permission identity, stale files) and hands the verb to
-// `VerbRunner`, which runs it and returns its output; the verbs themselves never print or exit on their own.
+// This file only gets the process into the right shape and hands the verb on: to the `serve` daemon when one is
+// running (ServeClient), else to `VerbRunner` in this process. The verbs themselves never print or exit on their own.
 
 import Foundation
 import Mail42AppleMail
 
-let mail42Version = "0.2.0"
+let mail42Version = "0.3.0"
 
 // `--reexec` is the internal marker of the permission-identity re-launch (Mail42Daemon); verbs never see it.
 let argv = Mail42Daemon.strippingReexec(CommandLine.arguments)
@@ -32,13 +32,23 @@ enum Dispatcher {
 
     static func run(command: String, args: [String]) -> Never {
         VerbRunner.version = mail42Version
+
+        // The daemon (`mail42 serve`) is the one process that stays; it sets up its own permission identity.
+        if command == "serve" { ServeCommand.run(args: args, version: mail42Version) }
+
+        // A daemon of this version answers for us (it already is the right permission principal).
+        if let answer = ServeClient.forward(command: command, args: args, version: mail42Version) { finish(answer) }
+
         if readVerbs.contains(command) {
             Mail42Daemon.reexecIfNeeded(arguments: [command] + args)
         }
         // A run that was killed before it could close leaves its fallback copy of the index in $TMPDIR.
         EnvelopeIndexSnapshot.removeStaleCopies()
 
-        let result = VerbRunner.run(command: command, args: args)
+        finish(VerbRunner.run(command: command, args: args))
+    }
+
+    private static func finish(_ result: VerbResult) -> Never {
         FileHandle.standardOutput.write(result.stdout)
         if !result.stderr.isEmpty { FileHandle.standardError.write(Data(result.stderr.utf8)) }
         exit(result.status)

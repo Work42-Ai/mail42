@@ -119,7 +119,7 @@ import Mail42TestSupport
         try seed(fixture)
         let snapshot = try EnvelopeIndexSnapshot.open(mailRoot: fixture.mailRoot)
         defer { snapshot.close() }
-        guard snapshot.readsInPlace else { return }   // the fixture's WAL can't be shared on this machine: nothing to prove
+        try #require(snapshot.readsInPlace, "the fixture index should be readable in place")
         #expect(try snapshot.connection.scalarInt("SELECT count(*) FROM messages") == 2)
 
         try fixture.addMessage(.init(

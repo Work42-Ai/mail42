@@ -6,7 +6,7 @@
 
 import Foundation
 
-struct VerbResult {
+struct VerbResult: Sendable {
     let stdout: Data
     let stderr: String
     /// The exit status: 0 when the verb returned, else the status of the `VerbExit` that ended it.
@@ -117,6 +117,12 @@ enum VerbRunner {
                 Full Disk Access status. Exit 0 when granted.
           permissions open
                 Open System Settings → Privacy & Security → Full Disk Access.
+
+        Service:
+          serve [--detach]
+                The background service the Mail widget and Work42 use: one process that keeps Mail's index open and
+                answers every client, and tells them when Mail changed. --detach starts it in the background and
+                returns. Every other verb uses it when it is running and works alone when it isn't.
 
         Other:
           version        Print the version.

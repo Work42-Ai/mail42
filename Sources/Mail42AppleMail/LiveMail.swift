@@ -27,8 +27,13 @@ public final class LiveMail {
     private let capabilities: EnvelopeIndexSnapshot.Capabilities
     private let hasLabels: Bool
     private let accountInfo: [String: AccountDirectory.Info]
-    private var mailboxRows: [MailboxRow]
-    private var mailboxByID: [Int64: MailboxRow]
+    // The one part of this object that changes after it is opened (`reloadMailboxes`), so the one part guarded by a
+    // lock: requests running on other threads read a whole, consistent list, never one half replaced.
+    private let rowsLock = NSLock()
+    private var storedRows: [MailboxRow]
+    private var storedByID: [Int64: MailboxRow]
+    private var mailboxRows: [MailboxRow] { rowsLock.lock(); defer { rowsLock.unlock() }; return storedRows }
+    private var mailboxByID: [Int64: MailboxRow] { rowsLock.lock(); defer { rowsLock.unlock() }; return storedByID }
 
     /// Mailboxes with at most this many messages are listed by sorting their members; bigger ones by walking the
     /// date index and testing membership (which stops as soon as the page is full).
@@ -39,6 +44,22 @@ public final class LiveMail {
     /// - Throws: `.fdaDenied` when macOS refuses the read, `.noMailData` when there's no Apple Mail store,
     ///   `.schemaUnsupported` when Apple's private schema isn't what mail42 expects.
     public static func open(
+        library: URL = Mail42Paths.appleMailLibrary,
+        accountsDatabase: URL = Mail42Paths.accountsDatabase
+    ) throws -> LiveMail {
+        // A process that serves many requests (the daemon) installs a pool, so they share one open index instead
+        // of each opening it again. Only the real library is pooled: a caller that names its own paths (tests) gets its own.
+        if let pool = pool, library == Mail42Paths.appleMailLibrary, accountsDatabase == Mail42Paths.accountsDatabase {
+            return try pool.get()
+        }
+        return try openFresh(library: library, accountsDatabase: accountsDatabase)
+    }
+
+    /// The pool `open()` takes the real library from, or nil to open it fresh every time (the CLI).
+    nonisolated(unsafe) public static var pool: LiveMailPool?
+
+    /// Opens the index now, ignoring any pool.
+    public static func openFresh(
         library: URL = Mail42Paths.appleMailLibrary,
         accountsDatabase: URL = Mail42Paths.accountsDatabase
     ) throws -> LiveMail {
@@ -69,8 +90,8 @@ public final class LiveMail {
         self.hasLabels = labelColumns.contains("message_id") && labelColumns.contains("mailbox_id")
 
         let rows = try Self.readMailboxRows(snapshot.connection)
-        self.mailboxRows = rows
-        self.mailboxByID = Self.index(rows)
+        self.storedRows = rows
+        self.storedByID = Self.index(rows)
     }
 
     private static func readMailboxRows(_ connection: SQLiteConnection) throws -> [MailboxRow] {
@@ -91,11 +112,31 @@ public final class LiveMail {
 
     /// Reads the mailboxes and their counters again. The index is read in place, so a `LiveMail` that stays open
     /// (the `serve` daemon) sees new mail in every query but would keep the mailbox list and counters it read
-    /// when it opened, until this is called. Not safe to call while another thread is using this object.
+    /// when it opened, until this is called. Safe while other threads are using this object.
     public func reloadMailboxes() throws {
         let rows = try Self.readMailboxRows(snapshot.connection)
-        mailboxRows = rows
-        mailboxByID = Self.index(rows)
+        let byID = Self.index(rows)
+        rowsLock.lock()
+        storedRows = rows
+        storedByID = byID
+        rowsLock.unlock()
+    }
+
+    /// Every mailbox's id and Apple's total and unread counters as one string (`12:830:4,13:40:0`), read from the
+    /// index now (not from the rows cached when this was opened). It changes exactly when mail arrives, is read,
+    /// flagged, moved or deleted, so it is the cheap way to tell that something changed.
+    public func mailboxSignature() throws -> String {
+        var parts: [String] = []
+        try snapshot.connection.query("SELECT ROWID, total_count, unread_count FROM mailboxes ORDER BY ROWID") { row in
+            parts.append("\(row.int(0)):\(row.int(1)):\(row.int(2))")
+        }
+        return parts.joined(separator: ",")
+    }
+
+    /// True when a mailbox belongs to an account this object has no name or address for (an account added to Mail
+    /// after it was opened): the accounts are read once at open, so only opening again picks it up.
+    public var hasUnknownAccount: Bool {
+        mailboxRows.contains { accountInfo[$0.accountID] == nil }
     }
 
     deinit { snapshot.close() }
