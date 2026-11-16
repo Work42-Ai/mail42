@@ -163,8 +163,11 @@ final class MailModel {
         #if os(macOS)
         return MailServeClient()
         #else
-        guard let shell = services?.shell else { return MailUnavailableTransport() }
-        return MailShellTransport(shell: shell)
+        guard let services else { return MailUnavailableTransport() }
+        let shell = services.shell
+        // The Mac pushes `widget:mail/changes` (its Work42 listens to the mail42 service for us); a host that has no such stream
+        // finishes it at once, and the transport then falls back to asking for the counters.
+        return MailShellTransport(shell: shell, changeStream: { await MainActor.run { services.stream("changes", widget: "widget:mail") } })
         #endif
     }
 
