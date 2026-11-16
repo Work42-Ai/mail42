@@ -1,11 +1,14 @@
 // MailModel.swift — the Mail widget's state: what's selected, what's loaded, and how the reader gets its HTML.
 //
-// Everything comes from the `mail42` CLI, which reads Apple Mail's own data live (there is no copy and no sync).
-// All CLI work and JSON decoding happen off the main thread; this class only holds finished values. A list load
-// is cancellable and coalesced (the newest request wins), and the list you are looking at stays on screen while
-// a refresh runs. While visible, one light loop watches for change: it waits for Full Disk Access when that
-// isn't granted yet, and otherwise re-reads the mailbox counts every few seconds and refreshes the list when
-// they move (new mail, something read or flagged elsewhere).
+// Everything comes from mail42, which reads Apple Mail's own data live (there is no copy and no sync). The model never
+// talks to it itself: it asks the `MailStore` (an actor, see MailStore.swift) and applies the finished, decoded value,
+// so nothing on the main thread waits for mail. A list load is cancellable and coalesced (the newest request wins),
+// and the list you are looking at stays on screen while a refresh runs.
+//
+// The model works only while a tile is on screen (`attach`/`detach`, one owner per visible tile, so one tile going away
+// never stops it for another). While it works it asks nothing on a timer: mail42's daemon tells it when Mail changed
+// (new mail, something read or flagged elsewhere) and it asks again for what it shows. The one exception is waiting for
+// Full Disk Access: until it is granted the model checks every couple of seconds so the setup screen goes by itself.
 
 import Foundation
 import Observation
@@ -104,20 +107,66 @@ final class MailModel {
 
     private static let pageSize = 50
     private static let searchLimit = 300
-    private static let readerArtifactID = "mail42-reader"
+    fileprivate static let readerArtifactID = "mail42-reader"
     private static let keptReaders = 8
-    private static let changeInterval: Duration = .seconds(6)
     private static let accessInterval: Duration = .seconds(2)
 
     private var watchTask: Task<Void, Never>?
+    private var accessTask: Task<Void, Never>?
     private var listTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var noticeTask: Task<Void, Never>?
     private var prefetchTask: Task<Void, Never>?
+    /// What opening a message asks for. Opening another message cancels these (the mark-read is not one of them).
+    private var readerTask: Task<Void, Never>?
+    private var threadTask: Task<Void, Never>?
     private var readerGeneration = 0
     private var listGeneration = 0
     private var isLoadingMore = false
-    private var treeSignature = ""
+
+    /// The visible tiles, by owner (and the services each brought). The model works while there is at least one.
+    private var owners: Set<UUID> = []
+    private var ownerServices: [UUID: SessionServices] = [:]
+    private var storeStorage: MailStore?
+
+    @ObservationIgnored private let makeTransport: (SessionServices?) -> any MailTransport
+    #if os(macOS)
+    @ObservationIgnored private let readerFiles: ReaderFiles
+    #endif
+
+    /// - Parameters:
+    ///   - makeTransport: how requests reach mail42 (the daemon on the Mac, the paired Mac's shell on the iPad); tests pass a fake.
+    ///   - readerFiles: where the reader's HTML lives (macOS); tests pass a temporary folder.
+    #if os(macOS)
+    init(
+        makeTransport: @escaping (SessionServices?) -> any MailTransport = { MailModel.defaultTransport(services: $0) },
+        readerFiles: ReaderFiles = .live
+    ) {
+        self.makeTransport = makeTransport
+        self.readerFiles = readerFiles
+    }
+    #else
+    init(makeTransport: @escaping (SessionServices?) -> any MailTransport = { MailModel.defaultTransport(services: $0) }) {
+        self.makeTransport = makeTransport
+    }
+    #endif
+
+    /// Where every question to mail42 goes (see MailStore.swift). Made when first needed, dropped when the last tile goes.
+    private var mailStore: MailStore {
+        if let storeStorage { return storeStorage }
+        let created = MailStore(transport: makeTransport(services))
+        storeStorage = created
+        return created
+    }
+
+    private static func defaultTransport(services: SessionServices?) -> any MailTransport {
+        #if os(macOS)
+        return MailServeClient()
+        #else
+        guard let shell = services?.shell else { return MailUnavailableTransport() }
+        return MailShellTransport(shell: shell)
+        #endif
+    }
 
     /// Messages already written for the reader, oldest first (a small LRU: files and web views are disposable).
     private var readerCache: [Int64: ReaderEntry] = [:]
@@ -125,46 +174,94 @@ final class MailModel {
 
     // MARK: - Lifecycle
 
-    func start(services: SessionServices) {
-        self.services = services
-        #if os(iOS)
-        MailCLI.remoteShell = services.shell
-        #endif
-        if me == nil, let account = services.account {
+    /// A widget instance came up: remember its services (a `mail42://` link or a header button can arrive before the tile
+    /// is drawn). Starts nothing: only a tile on screen makes the model work.
+    func adopt(services: SessionServices) {
+        if self.services == nil { self.services = services }
+    }
+
+    /// A tile is on screen. The first one starts the model.
+    func attach(owner: UUID, services: SessionServices?) {
+        owners.insert(owner)
+        if let services {
+            ownerServices[owner] = services
+            self.services = services
+        }
+        guard owners.count == 1 else { return }
+        begin()
+    }
+
+    /// A tile went away. The model stops when the last one has; the others carry on.
+    func detach(owner: UUID) {
+        guard owners.remove(owner) != nil else { return }
+        ownerServices[owner] = nil
+        if owners.isEmpty {
+            end()
+        } else if let remaining = owners.compactMap({ ownerServices[$0] }).first {
+            services = remaining
+        }
+    }
+
+    /// How many tiles are keeping the model working (for tests).
+    var attachedCount: Int { owners.count }
+
+    private func begin() {
+        guard watchTask == nil else { return }
+        if me == nil, let account = services?.account {
             Task { [weak self] in self?.me = await account.currentUser() }
         }
-        guard watchTask == nil else { return }
         watchTask = Task { [weak self] in
             await self?.bootstrap()
-            while !Task.isCancelled {
-                guard let self else { return }
-                let waiting = self.state == .needsAccess || self.state == .noMail || self.state == .notInstalled
-                try? await Task.sleep(for: waiting ? Self.accessInterval : Self.changeInterval)
+            guard let self else { return }
+            // Nothing is asked on a timer: mail42 says when Mail changed.
+            for await _ in self.mailStore.changes() {
                 guard !Task.isCancelled else { return }
-                await self.tick()
+                await self.mailChanged()
             }
         }
     }
 
-    func stop() {
+    private func end() {
         watchTask?.cancel(); watchTask = nil
+        accessTask?.cancel(); accessTask = nil
         listTask?.cancel(); listTask = nil
         searchTask?.cancel(); searchTask = nil
         noticeTask?.cancel(); noticeTask = nil
         prefetchTask?.cancel(); prefetchTask = nil
+        readerTask?.cancel(); readerTask = nil
+        threadTask?.cancel(); threadTask = nil
         readerGeneration += 1
         dropReaderCache()
+        let finished = storeStorage
+        storeStorage = nil
+        if let finished { Task { await finished.shutdown() } }       // closes the connection: nothing is held while hidden
         services = nil
     }
 
     /// First load, and the retry after a failure.
     func bootstrap() async {
         if envelopes.isEmpty { state = .loading }
-        switch await MailCLI.access() {
-        case .notInstalled: state = .notInstalled
-        case .denied: state = .needsAccess
-        case .noMailData: state = .noMail
+        switch await mailStore.access() {
+        case .notInstalled: state = .notInstalled; waitForAccess()
+        case .denied: state = .needsAccess; waitForAccess()
+        case .noMailData: state = .noMail; waitForAccess()
         case .granted: await reloadAll()
+        }
+    }
+
+    private var isWaitingForAccess: Bool { state == .needsAccess || state == .noMail || state == .notInstalled }
+
+    /// Until Full Disk Access is granted (or Mail has an account) there is nothing for the daemon to tell us about, so
+    /// look again every couple of seconds. This is the only timer, and it stops the moment mail is readable.
+    private func waitForAccess() {
+        guard accessTask == nil else { return }
+        accessTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.accessInterval)
+                guard !Task.isCancelled, let self, self.isWaitingForAccess else { break }
+                await self.bootstrap()
+            }
+            self?.accessTask = nil
         }
     }
 
@@ -176,37 +273,22 @@ final class MailModel {
         }
     }
 
-    /// One beat of the watch loop.
-    private func tick() async {
-        switch state {
-        case .needsAccess, .noMail, .notInstalled:
-            await bootstrap()
-        case .ready:
-            // The mailbox list is the cheap change detector: Apple Mail keeps its counters current.
-            guard let fresh = try? await MailCLI.json([MailAccountTree].self, ["mailbox", "list"]) else { return }
-            let signature = Self.signature(of: fresh)
-            guard signature != treeSignature else { return }
-            tree = fresh
-            treeSignature = signature
-            await refreshQuietly()
-        case .loading, .failed:
-            break
-        }
-    }
-
-    private static func signature(of tree: [MailAccountTree]) -> String {
-        tree.flatMap { account in account.mailboxes.map { "\($0.id):\($0.total):\($0.unread)" } }.joined(separator: ",")
+    /// mail42 says Mail changed (new mail, something read, flagged, moved or deleted, here or elsewhere): ask again for
+    /// the counters and for the list as it is now, at the same depth, so nothing the user is looking at moves.
+    private func mailChanged() async {
+        guard state == .ready else { return }
+        if let fresh = try? await mailStore.json([MailAccountTree].self, ["mailbox", "list"]) { tree = fresh }
+        await refreshQuietly()
     }
 
     // MARK: - Loading the list
 
     private func reloadAll() async {
         do {
-            async let fetchedTree = MailCLI.json([MailAccountTree].self, ["mailbox", "list"])
+            async let fetchedTree = mailStore.json([MailAccountTree].self, ["mailbox", "list"])
             let page = try await fetch(limit: Self.pageSize, before: nil)
             let loaded = try await fetchedTree
             tree = loaded
-            treeSignature = Self.signature(of: loaded)
             envelopes = page
             canLoadMore = query.trimmingCharacters(in: .whitespaces).isEmpty && page.count >= Self.pageSize
             state = loaded.isEmpty ? .noMail : .ready
@@ -229,9 +311,9 @@ final class MailModel {
             return
         }
         switch failure.code {
-        case "not_installed": state = .notInstalled
-        case "fda_denied": state = .needsAccess
-        case "no_mail_data": state = .noMail
+        case "not_installed": state = .notInstalled; waitForAccess()
+        case "fda_denied": state = .needsAccess; waitForAccess()
+        case "no_mail_data": state = .noMail; waitForAccess()
         default: state = .failed(failure.message)
         }
     }
@@ -298,9 +380,9 @@ final class MailModel {
     /// Searches the headers only (subject, sender, recipients, the preview line, dates, state): the answer is complete
     /// and instant. Reading the text of 160,000 messages is not something a tile can wait for.
     private func search(_ query: String) async throws -> [MailEnvelope] {
-        try await MailCLI.json(
+        try await mailStore.json(
             [MailEnvelope].self, ["envelope", "search", query, "--headers", "--limit", String(Self.searchLimit)],
-            timeout: 30)
+            priority: .list, timeout: .seconds(30))
     }
 
     private func fetch(limit: Int, before: Int64?) async throws -> [MailEnvelope] {
@@ -324,7 +406,7 @@ final class MailModel {
         }
         if unreadOnly { arguments.append("--unread") }
         if let before { arguments += ["--before", String(before)] }
-        return try await MailCLI.json([MailEnvelope].self, arguments)
+        return try await mailStore.json([MailEnvelope].self, arguments, priority: .list)
     }
 
     // MARK: - Header and toolbar
@@ -469,7 +551,9 @@ final class MailModel {
 
     /// Runs a verb that opens something in Mail (a draft, a message): there is nothing to change in the list.
     private func run(_ arguments: [String], failure: String) async {
-        do { _ = try await MailCLI.json(MailActionResult.self, arguments, timeout: 40) } catch { report(error, fallback: failure) }
+        do {
+            _ = try await mailStore.json(MailActionResult.self, arguments, priority: .opened, timeout: .seconds(40))
+        } catch { report(error, fallback: failure) }
     }
 
     /// Read or unread: the dot and the counts change at once; Mail is told in the background, and if it refuses the
@@ -478,7 +562,8 @@ final class MailModel {
         guard envelope.isRead != read else { return }
         applyRead(envelope.id, read, mailboxID: envelope.mailbox.id)
         do {
-            _ = try await MailCLI.json(MailActionResult.self, ["mark", envelope.reference, read ? "read" : "unread"], timeout: 40)
+            _ = try await mailStore.json(
+                MailActionResult.self, ["mark", envelope.reference, read ? "read" : "unread"], priority: .opened, timeout: .seconds(40))
         } catch {
             applyRead(envelope.id, !read, mailboxID: envelope.mailbox.id)
             report(error, fallback: "Couldn't change the message in Mail")
@@ -502,7 +587,6 @@ final class MailModel {
         for account in tree.indices {
             guard let box = tree[account].mailboxes.firstIndex(where: { $0.id == mailboxID }) else { continue }
             tree[account].mailboxes[box].unread = max(0, tree[account].mailboxes[box].unread + delta)
-            treeSignature = Self.signature(of: tree)               // our own change is not "news" for the watcher
         }
     }
 
@@ -512,7 +596,7 @@ final class MailModel {
         do {
             var arguments = ["mark", envelope.reference, color == nil ? "unflagged" : "flagged"]
             if let color { arguments += ["--color", color] }
-            _ = try await MailCLI.json(MailActionResult.self, arguments, timeout: 40)
+            _ = try await mailStore.json(MailActionResult.self, arguments, priority: .opened, timeout: .seconds(40))
         } catch {
             if let index = envelopes.firstIndex(where: { $0.id == envelope.id }) { envelopes[index].isFlagged = before }
             report(error, fallback: "Couldn't change the flag in Mail")
@@ -530,7 +614,7 @@ final class MailModel {
             if let next { select(next.id) } else { clearSelection() }
         }
         do {
-            _ = try await MailCLI.json(MailActionResult.self, arguments, timeout: 60)
+            _ = try await mailStore.json(MailActionResult.self, arguments, priority: .opened, timeout: .seconds(60))
             show(done)
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(2))
@@ -548,6 +632,9 @@ final class MailModel {
         thread = []
         expandedID = nil
         readerGeneration += 1
+        readerTask?.cancel(); readerTask = nil
+        threadTask?.cancel(); threadTask = nil
+        prefetchTask?.cancel(); prefetchTask = nil
         reader = .none
         attachments = []
     }
@@ -567,7 +654,7 @@ final class MailModel {
     func openSelectedInMail() async { await perform(.openInMail) }
 
     func openFullDiskAccessSettings() async {
-        _ = await MailCLI.run(["permissions", "open"], timeout: 20)
+        _ = try? await mailStore.run(["permissions", "open"], priority: .opened, timeout: .seconds(20))
     }
 
     #if os(iOS)
@@ -581,8 +668,8 @@ final class MailModel {
         guard let id = expandedID ?? selectedID else { return }
         do {
             nonisolated struct Saved: Decodable, Sendable { let path: String }
-            let saved = try await MailCLI.json(
-                Saved.self, ["attachment", "save", String(id), attachment.part, "--to", "~/Downloads"])
+            let saved = try await mailStore.json(
+                Saved.self, ["attachment", "save", String(id), attachment.part, "--to", "~/Downloads"], priority: .opened)
             show("Saved \(URL(fileURLWithPath: saved.path).lastPathComponent) to your Mac\u{2019}s Downloads")
         } catch let failure as MailFailure {
             show(failure.message)
@@ -597,8 +684,8 @@ final class MailModel {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("mail42-quicklook-\(id)", isDirectory: true)
         do {
             nonisolated struct Saved: Decodable, Sendable { let path: String }
-            let saved = try await MailCLI.json(
-                Saved.self, ["attachment", "save", String(id), attachment.part, "--to", folder.path])
+            let saved = try await mailStore.json(
+                Saved.self, ["attachment", "save", String(id), attachment.part, "--to", folder.path], priority: .opened)
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/qlmanage")
             process.arguments = ["-p", saved.path]
@@ -616,8 +703,8 @@ final class MailModel {
             ?? NSHomeDirectory() + "/Downloads"
         do {
             nonisolated struct Saved: Decodable, Sendable { let path: String }
-            let saved = try await MailCLI.json(
-                Saved.self, ["attachment", "save", String(id), attachment.part, "--to", downloads])
+            let saved = try await mailStore.json(
+                Saved.self, ["attachment", "save", String(id), attachment.part, "--to", downloads], priority: .opened)
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: saved.path)])
             show("Saved \(URL(fileURLWithPath: saved.path).lastPathComponent)")
         } catch let failure as MailFailure {
@@ -655,9 +742,12 @@ final class MailModel {
         showDetails = false
         thread = selectedSnapshot.map { [$0] } ?? []
         showReader(id: id)
-        Task { [weak self] in
-            guard let loaded = try? await MailCLI.json([MailEnvelope].self, ["message", "thread", String(id)]) else { return }
-            guard let self, self.selectedID == id, !loaded.isEmpty else { return }
+        threadTask?.cancel()                                        // the previous message's conversation: no longer wanted
+        threadTask = Task { [weak self] in
+            guard let self else { return }
+            guard let loaded = try? await self.mailStore.json([MailEnvelope].self, ["message", "thread", String(id)], priority: .opened)
+            else { return }
+            guard !Task.isCancelled, self.selectedID == id, !loaded.isEmpty else { return }
             self.thread = loaded
         }
     }
@@ -681,6 +771,8 @@ final class MailModel {
         expandedID = nil
         showDetails = false
         readerGeneration += 1
+        readerTask?.cancel(); readerTask = nil
+        prefetchTask?.cancel(); prefetchTask = nil
         reader = .none
         attachments = []
     }
@@ -756,7 +848,7 @@ final class MailModel {
         var arguments = ["message", "resolve", url.absoluteString]
         if case .mailbox(let id) = selection { arguments += ["--prefer-mailbox", String(id)] }
         do {
-            let found = try await MailCLI.json(MailEnvelope.self, arguments)
+            let found = try await mailStore.json(MailEnvelope.self, arguments, priority: .opened)
             missingMessage = false
             if envelopes.contains(where: { $0.id == found.id }) {
                 select(found.id)
@@ -805,14 +897,17 @@ final class MailModel {
         }
         reader = .loading(id)
         attachments = []
-        Task { [weak self] in
+        readerTask?.cancel()                                        // another message's body: no longer wanted
+        readerTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let entry = try await self.prepare(id: id)
-                guard generation == self.readerGeneration else { return }   // another message was picked meanwhile
+                let entry = try await self.prepare(id: id, priority: .opened)
+                guard generation == self.readerGeneration, !Task.isCancelled else { return }   // another message was picked meanwhile
                 self.store(entry, id: id)
                 self.present(entry, id: id)
                 self.prefetchNeighbors(of: id)
+            } catch is CancellationError {
+                return
             } catch let failure as MailFailure {
                 guard generation == self.readerGeneration else { return }
                 self.reader = failure.code == "fda_denied" ? .needsAccess : .failed(id: id, message: failure.message)
@@ -838,10 +933,10 @@ final class MailModel {
     #if os(iOS)
     /// Asks the Mac's mail42 for the message with its HTML in the answer (there is no folder to write it to), and
     /// puts it in Work42's theme.
-    private func prepare(id: Int64) async throws -> ReaderEntry {
+    private func prepare(id: Int64, priority: MailStore.Priority) async throws -> ReaderEntry {
         let key = "\(id)-\(UUID().uuidString.prefix(8).lowercased())"
-        async let list = MailCLI.json([MailAttachment].self, ["attachment", "list", String(id)])
-        let result = try await MailCLI.json(MailReadResult.self, ["message", "read", String(id), "--html"])
+        async let list = mailStore.json([MailAttachment].self, ["attachment", "list", String(id)], priority: priority)
+        let result = try await mailStore.json(MailReadResult.self, ["message", "read", String(id), "--html"], priority: priority)
         let listed = (try? await list) ?? []
         let tokens = CanvasTheme.tokensCSS()
         guard !result.bodyUnavailable, let html = result.html else {
@@ -853,15 +948,15 @@ final class MailModel {
     }
     #else
     /// Asks the CLI for the message (HTML to a file, attachments alongside) off the main thread.
-    private func prepare(id: Int64) async throws -> ReaderEntry {
+    private func prepare(id: Int64, priority: MailStore.Priority) async throws -> ReaderEntry {
         guard let directory = readerDirectory() else {
             throw MailFailure(code: "no_folder", message: "mail42 couldn't prepare a folder to show the message from.")
         }
         let key = "\(id)-\(UUID().uuidString.prefix(8).lowercased())"
         let file = directory.appendingPathComponent("m\(key).html")
-        async let list = MailCLI.json([MailAttachment].self, ["attachment", "list", String(id)])
-        let result = try await MailCLI.json(
-            MailReadResult.self, ["message", "read", String(id), "--html", "--out", file.path])
+        async let list = mailStore.json([MailAttachment].self, ["attachment", "list", String(id)], priority: priority)
+        let result = try await mailStore.json(
+            MailReadResult.self, ["message", "read", String(id), "--html", "--out", file.path], priority: priority)
         let listed = (try? await list) ?? []
         let tokens = CanvasTheme.tokensCSS()
         let stamp = tokens.hashValue
@@ -881,17 +976,16 @@ final class MailModel {
     }
     #endif
 
-    /// Warms the next messages in the list so stepping through them is instant.
+    /// Warms the next message in the list, so stepping down the list is instant. Only that one, and last in line: a guess
+    /// never delays what the user asked for, and opening another message cancels it.
     private func prefetchNeighbors(of id: Int64) {
-        guard let index = envelopes.firstIndex(where: { $0.id == id }) else { return }
-        let neighbours = [index + 1, index - 1, index + 2].filter { envelopes.indices.contains($0) }.map { envelopes[$0].id }
+        guard let index = envelopes.firstIndex(where: { $0.id == id }), envelopes.indices.contains(index + 1) else { return }
+        let next = envelopes[index + 1].id
+        guard readerCache[next] == nil else { return }
         prefetchTask = Task { [weak self] in
-            for neighbour in neighbours {
-                guard let self, !Task.isCancelled else { return }
-                if self.readerCache[neighbour] != nil { continue }
-                if let entry = try? await self.prepare(id: neighbour), !Task.isCancelled {
-                    self.store(entry, id: neighbour, becomesNewest: false)
-                }
+            guard let self, !Task.isCancelled else { return }
+            if let entry = try? await self.prepare(id: next, priority: .prefetch), !Task.isCancelled {
+                self.store(entry, id: next, becomesNewest: false)
             }
         }
     }
@@ -899,35 +993,44 @@ final class MailModel {
     // MARK: - The reader's files
 
     #if os(macOS)
-    // The reader's HTML lives in mail42's own folder, which is registered with the artifact server under mail42's
-    // own id (a stand-in "session"). The widget therefore works in a session tab and on the session-less
-    // workspace home alike (where `services.sessionId` is nil), and never fills a session's artifact gallery.
-    private static let readerHostID = "mail42-reader"
+    /// Where the reader's HTML lives and how the web view reaches it.
+    ///
+    /// The HTML lives in mail42's own folder, which is registered with the artifact server under mail42's own id (a
+    /// stand-in "session"). The widget therefore works in a session tab and on the session-less workspace home alike
+    /// (where `services.sessionId` is nil), and never fills a session's artifact gallery.
+    struct ReaderFiles {
+        /// The folder a message's page is written to (made if needed); nil when it can't be.
+        var directory: () -> URL?
+        /// The address the web view loads a written page from; nil while the artifact server isn't answering.
+        var url: (String) -> URL?
+        /// Deletes every page (when the model stops).
+        var removeAll: () -> Void
 
-    private static var readerBase: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".work42/mail42/reader", isDirectory: true)
-    }
-
-    private static var readerFolder: URL {
-        readerBase.appendingPathComponent("artifacts/\(readerArtifactID)", isDirectory: true)
-    }
-
-    /// `~/.work42/mail42/reader/artifacts/mail42-reader`: the artifact server serves this folder to the web view.
-    private func readerDirectory() -> URL? {
-        if ArtifactRuntime.directory(forSessionId: Self.readerHostID) != Self.readerBase.path {
-            try? ArtifactRuntime.register(sessionId: Self.readerHostID, directory: Self.readerBase.path)
+        private static let hostID = "mail42-reader"
+        private static var base: URL {
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".work42/mail42/reader", isDirectory: true)
         }
-        let directory = Self.readerFolder
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory
+        private static var folder: URL { base.appendingPathComponent("artifacts/\(MailModel.readerArtifactID)", isDirectory: true) }
+
+        /// `~/.work42/mail42/reader/artifacts/mail42-reader`, served by the artifact server.
+        static let live = ReaderFiles(
+            directory: {
+                if ArtifactRuntime.directory(forSessionId: hostID) != base.path {
+                    try? ArtifactRuntime.register(sessionId: hostID, directory: base.path)
+                }
+                try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                return folder
+            },
+            url: { fileName in
+                guard let served = ArtifactRuntime.url(sessionId: hostID, artifactId: MailModel.readerArtifactID) else { return nil }
+                return URL(string: served.absoluteString + fileName)
+            },
+            removeAll: { try? FileManager.default.removeItem(at: folder) })
     }
 
-    private func readerURL(fileName: String) -> URL? {
-        guard let base = ArtifactRuntime.url(sessionId: Self.readerHostID, artifactId: Self.readerArtifactID)
-        else { return nil }
-        return URL(string: base.absoluteString + fileName)
-    }
+    private func readerDirectory() -> URL? { readerFiles.directory() }
+
+    private func readerURL(fileName: String) -> URL? { readerFiles.url(fileName) }
     #endif
 
     private func store(_ entry: ReaderEntry, id: Int64, becomesNewest: Bool = true) {
@@ -954,7 +1057,7 @@ final class MailModel {
     private func dropReaderCache() {
         for id in Array(readerCache.keys) { evict(id) }
         #if os(macOS)
-        try? FileManager.default.removeItem(at: Self.readerFolder)
+        readerFiles.removeAll()
         #endif
     }
 }
