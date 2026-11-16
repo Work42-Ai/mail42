@@ -27,21 +27,21 @@ enum PermissionsCommand {
         }
     }
 
-    static func run(args: [String]) {
+    static func run(args: [String]) throws {
         switch CLI.firstPositional(args) {
         case nil:
-            check(args: args)
+            try check(args: args)
         case "open":
-            openSettings()
+            try openSettings()
         case "automation":
-            automation(args: args)
+            try automation(args: args)
         case let other?:
-            CLI.fail(code: "usage", message: "unknown permissions subcommand `\(other)` (try `permissions` or `permissions open`)",
-                     exit: 2, json: CLI.wantsJSON(args))
+            try CLI.fail(code: "usage", message: "unknown permissions subcommand `\(other)` (try `permissions` or `permissions open`)",
+                         exit: 2, json: CLI.wantsJSON(args))
         }
     }
 
-    private static func check(args: [String]) {
+    private static func check(args: [String]) throws {
         // Re-launch as mail42's own permission principal, so the answer is about the Full Disk Access grant of
         // mail42.app, not of the Terminal or Work42 that started it.
         Mail42Daemon.reexecIfNeeded(arguments: ["permissions"] + args)
@@ -50,7 +50,7 @@ enum PermissionsCommand {
         let root = Mail42Paths.appleMailRoot()?.path
 
         if CLI.wantsJSON(args) {
-            CLI.emitJSON(Report(fullDiskAccess: state.rawValue, mailRoot: root))
+            try CLI.emitJSON(Report(fullDiskAccess: state.rawValue, mailRoot: root))
         } else {
             switch state {
             case .granted:
@@ -64,12 +64,12 @@ enum PermissionsCommand {
                 print("Mail may not be set up on this Mac.")
             }
         }
-        exit(state == .granted ? 0 : 1)
+        throw VerbExit(status: state == .granted ? 0 : 1)
     }
 
     /// `permissions automation`: whether mail42 may control Mail (needed by mark, move, archive, delete, junk and
     /// drafts). The first run makes macOS ask; answer Allow. Exit 0 when allowed.
-    private static func automation(args: [String]) {
+    private static func automation(args: [String]) throws {
         let json = CLI.wantsJSON(args)
         Mail42Daemon.reexecIfNeeded(arguments: ["permissions"] + args)
         // `--check` only reports the state (it never shows the prompt); otherwise macOS asks if it hasn't been asked.
@@ -84,33 +84,33 @@ enum PermissionsCommand {
             case .mailNotRunning: name = "mail_not_running"
             case .other(let code): name = "status_\(code)"
             }
-            if json { CLI.emitJSONObject(["automation": name] as [String: Any]) } else { print("Automation: \(name)") }
-            exit(state == .granted ? 0 : 1)
+            if json { try CLI.emitJSONObject(["automation": name] as [String: Any]) } else { print("Automation: \(name)") }
+            throw VerbExit(status: state == .granted ? 0 : 1)
         }
         do {
             let accounts = try MailActions().probe()
             if json {
-                CLI.emitJSONObject(["automation": "granted", "mail_accounts": accounts] as [String: Any])
+                try CLI.emitJSONObject(["automation": "granted", "mail_accounts": accounts] as [String: Any])
             } else {
                 print("Automation: granted (Mail answered; it has \(accounts) accounts)")
             }
         } catch Mail42Error.automationDenied {
-            if json { CLI.emitJSONObject(["automation": "denied"] as [String: Any]) } else {
+            if json { try CLI.emitJSONObject(["automation": "denied"] as [String: Any]) } else {
                 print("Automation: denied")
                 print("Open System Settings › Privacy & Security › Automation, turn on Mail under mail42, then run this again.")
             }
-            exit(1)
+            throw VerbExit(status: 1)
         } catch Mail42Error.mailTimeout {
-            if json { CLI.emitJSONObject(["automation": "no_answer"] as [String: Any]) } else {
+            if json { try CLI.emitJSONObject(["automation": "no_answer"] as [String: Any]) } else {
                 print("Automation: Mail didn't answer in two minutes. If macOS is asking whether mail42 may control Mail, answer Allow; then run this again.")
             }
-            exit(1)
+            throw VerbExit(status: 1)
         } catch {
-            CLI.fail(error: error, json: json)
+            try CLI.fail(error: error, json: json)
         }
     }
 
-    private static func openSettings() {
+    private static func openSettings() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         process.arguments = [settingsURL]
@@ -118,10 +118,10 @@ enum PermissionsCommand {
             try process.run()
             process.waitUntilExit()
         } catch {
-            CLI.fail("mail42: couldn't open System Settings: \(error.localizedDescription)", code: 1)
+            try CLI.fail("mail42: couldn't open System Settings: \(error.localizedDescription)", code: 1)
         }
         guard process.terminationStatus == 0 else {
-            CLI.fail("mail42: couldn't open System Settings (open exited \(process.terminationStatus))", code: 1)
+            try CLI.fail("mail42: couldn't open System Settings (open exited \(process.terminationStatus))", code: 1)
         }
         print("Opened System Settings → Privacy & Security → Full Disk Access.")
         print("Turn on mail42 (press + and choose ~/.work42/mail42.app if it isn't listed), then run `mail42 permissions`.")

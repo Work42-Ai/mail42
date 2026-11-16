@@ -87,16 +87,83 @@ import Mail42TestSupport
         #expect(throws: Mail42Error.self) { try snapshot.connection.execute("DELETE FROM messages") }
     }
 
-    @Test func closingRemovesTheTemporaryCopy() throws {
+    // MARK: - In place, and the fallback copy (WOR-827)
+
+    @Test func readsAppleMailsOwnFileWithoutCopyingIt() throws {
+        let fixture = try EnvelopeIndexBuilder(wal: true)
+        defer { fixture.cleanup() }
+        try seed(fixture)
+        let snapshot = try EnvelopeIndexSnapshot.open(mailRoot: fixture.mailRoot)
+        defer { snapshot.close() }
+        #expect(snapshot.readsInPlace)
+        #expect(snapshot.connection.path == fixture.envelopeIndexURL.path)
+        #expect(try snapshot.connection.scalarInt("SELECT count(*) FROM messages") == 2)
+    }
+
+    @Test func closingNeverRemovesAppleMailsFile() throws {
         let fixture = try EnvelopeIndexBuilder()
         defer { fixture.cleanup() }
         try seed(fixture)
         let snapshot = try EnvelopeIndexSnapshot.open(mailRoot: fixture.mailRoot)
+        #expect(snapshot.readsInPlace)
+        snapshot.close()
+        #expect(FileManager.default.fileExists(atPath: fixture.envelopeIndexURL.path))
+        snapshot.close()   // idempotent
+        #expect(FileManager.default.fileExists(atPath: fixture.envelopeIndexURL.path))
+    }
+
+    @Test func anOpenConnectionSeesMailThatArrivesAfterItOpened() throws {
+        // The reason a long-lived reader (the serve daemon) can't read a copy: Mail keeps writing.
+        let fixture = try EnvelopeIndexBuilder(wal: true)
+        defer { fixture.cleanup() }
+        try seed(fixture)
+        let snapshot = try EnvelopeIndexSnapshot.open(mailRoot: fixture.mailRoot)
+        defer { snapshot.close() }
+        guard snapshot.readsInPlace else { return }   // the fixture's WAL can't be shared on this machine: nothing to prove
+        #expect(try snapshot.connection.scalarInt("SELECT count(*) FROM messages") == 2)
+
+        try fixture.addMessage(.init(
+            rowid: 12, subject: "Arrived later", senderAddress: "late@acme.com", mailboxID: 1, dateReceived: 1_761_000_200))
+        #expect(try snapshot.connection.scalarInt("SELECT count(*) FROM messages") == 3)
+    }
+
+    @Test func theFallbackCopyIsRemovedOnClose() throws {
+        let fixture = try EnvelopeIndexBuilder()
+        defer { fixture.cleanup() }
+        try seed(fixture)
+        let snapshot = try EnvelopeIndexSnapshot.open(mailRoot: fixture.mailRoot, inPlace: false)
+        #expect(!snapshot.readsInPlace)
         let copyPath = snapshot.connection.path
+        #expect(copyPath != fixture.envelopeIndexURL.path)
         #expect(FileManager.default.fileExists(atPath: copyPath))
+        #expect(try snapshot.connection.scalarInt("SELECT count(*) FROM messages") == 2)
         snapshot.close()
         #expect(!FileManager.default.fileExists(atPath: copyPath))
+        #expect(FileManager.default.fileExists(atPath: fixture.envelopeIndexURL.path))   // Apple's file stays
         snapshot.close()   // idempotent
+    }
+
+    @Test func staleCopiesOfDeadProcessesAreSweptAndLiveOnesKept() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("mail42-sweep-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func make(_ name: String) throws {
+            try FileManager.default.createDirectory(
+                at: root.appendingPathComponent(name), withIntermediateDirectories: true)
+        }
+        let live = "mail42-\(getpid())-AAAA", dead = "mail42-2147480000-BBBB", deadToo = "mail42-2147480001-CCCC"
+        for name in [live, dead, deadToo, "mail42-cli-DDDD", "mail42-0-EEEE", "other-2147480000-FFFF"] { try make(name) }
+
+        let removed = EnvelopeIndexSnapshot.removeStaleCopies(in: root, isRunning: { $0 == getpid() })
+        #expect(removed == 2)
+        let left = Set(try FileManager.default.contentsOfDirectory(atPath: root.path))
+        // Only the two dead processes' copies went: ours, names that aren't `mail42-<pid>-…`, and other folders stay.
+        #expect(left == [live, "mail42-cli-DDDD", "mail42-0-EEEE", "other-2147480000-FFFF"])
+    }
+
+    @Test func sweepingAFolderThatDoesNotExistIsHarmless() {
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent("mail42-nope-\(UUID().uuidString)")
+        #expect(EnvelopeIndexSnapshot.removeStaleCopies(in: missing) == 0)
     }
 
     @Test func gmailLabelDuplicatesShareOneMessageID() throws {

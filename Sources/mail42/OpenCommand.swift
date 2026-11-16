@@ -11,9 +11,9 @@ import Mail42Kit
 
 enum OpenCommand {
 
-    static func run(args: [String]) {
+    static func run(args: [String]) throws {
         let json = CLI.wantsJSON(args)
-        let id = CLI.messageID(CLI.positionals(args).first, json: json)
+        let id = try CLI.messageID(CLI.positionals(args).first, json: json)
         do {
             guard let record = try LiveMail.open().envelopeRecord(id: id) else {
                 throw Mail42Error.notFound("message \(id)")
@@ -30,17 +30,17 @@ enum OpenCommand {
                 try process.run()
                 process.waitUntilExit()
                 guard process.terminationStatus == 0 else {
-                    CLI.fail(code: "open_failed", message: "couldn't open the message in Mail (open exited \(process.terminationStatus))",
-                             exit: 1, json: json)
+                    try CLI.fail(code: "open_failed", message: "couldn't open the message in Mail (open exited \(process.terminationStatus))",
+                                 exit: 1, json: json)
                 }
             }
             if json {
-                CLI.emitJSONObject(["url": url.absoluteString, "opened": !dryRun] as [String: Any])
+                try CLI.emitJSONObject(["url": url.absoluteString, "opened": !dryRun] as [String: Any])
             } else {
                 print(dryRun ? url.absoluteString : "Opened message \(id) in Mail.")
             }
         } catch {
-            CLI.fail(error: error, json: json)
+            try CLI.fail(error: error, json: json)
         }
     }
 }

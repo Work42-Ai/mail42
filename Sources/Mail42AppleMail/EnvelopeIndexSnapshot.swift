@@ -1,10 +1,17 @@
-// EnvelopeIndexSnapshot.swift — a private, read-only copy of Apple Mail's Envelope Index.
+// EnvelopeIndexSnapshot.swift — a read-only connection to Apple Mail's Envelope Index.
 //
 // Apple Mail keeps its message index in `<mailRoot>/MailData/Envelope Index`, a SQLite database in WAL mode
-// that Mail writes to while it runs. mail42 never opens that file itself: it copies the database and its
-// `-wal` into a private temp folder and reads the copy, read-only (never `immutable=1`, which would ignore the
-// WAL and miss recent mail). That keeps mail42 off Mail's locks and makes "never writes to Apple Mail" a
-// property of the code path rather than a promise.
+// that Mail writes to while it runs. mail42 opens that file itself with `SQLITE_OPEN_READONLY` (never
+// `immutable=1`, which would ignore the WAL and miss recent mail) and keeps every statement short, so it holds
+// no lock Mail would wait for. A read-only connection can't write the database, which makes "never writes to
+// Apple Mail" a property of the code path rather than a promise. Nothing is copied: the index is hundreds of
+// megabytes, and a copy would also be stale the moment Mail receives a message.
+//
+// Only when the in-place open fails (for example the `-shm` file is missing and can't be created because Mail
+// isn't running) does it fall back to the old way: copy the database and its `-wal` into a private temp folder
+// and read the copy, read-only. That copy belongs to this open alone and is removed by `close()`. A process
+// that is killed before `close()` leaves its copy behind, so every start sweeps copies whose process is gone
+// (`removeStaleCopies`).
 //
 // The schema is private and changes between macOS releases, so `validateSchema()` checks the columns mail42
 // reads before anything is indexed. Required columns are the ones che-apple-mail-mcp's queries have used
@@ -13,6 +20,7 @@
 // they're absent mail42 falls back (snippet from the body, Message-ID from the .emlx, date_sent = date_received)
 // instead of refusing to run.
 
+import Darwin
 import Foundation
 import Mail42Kit
 
@@ -20,12 +28,16 @@ public final class EnvelopeIndexSnapshot {
 
     /// The versioned mail root this snapshot was taken from (`~/Library/Mail/V10`).
     public let mailRoot: URL
-    /// The read-only connection to the copy. Valid until `close()`.
+    /// The read-only connection, to Mail's own file or to the fallback copy. Valid until `close()`.
     public let connection: SQLiteConnection
-    private let directory: URL
+    /// The private folder holding the fallback copy; nil when the connection is on Mail's own file (which is never removed).
+    private let directory: URL?
     private var closed = false
 
-    private init(mailRoot: URL, connection: SQLiteConnection, directory: URL) {
+    /// True when the connection reads Apple Mail's own file, false when it reads a private copy.
+    public var readsInPlace: Bool { directory == nil }
+
+    private init(mailRoot: URL, connection: SQLiteConnection, directory: URL?) {
         self.mailRoot = mailRoot
         self.connection = connection
         self.directory = directory
@@ -35,10 +47,12 @@ public final class EnvelopeIndexSnapshot {
 
     // MARK: - Opening
 
-    /// Copies the Envelope Index (and its WAL) to a private temp folder and opens the copy read-only.
+    /// Opens the Envelope Index in place, read-only; if that fails, copies it (and its WAL) to a private temp
+    /// folder and opens the copy read-only.
+    /// - Parameter inPlace: `false` skips the in-place attempt (tests of the fallback).
     /// - Throws: `.fdaDenied` when macOS refuses the read, `.noMailData` when there is no index,
     ///   `.databaseNotAccessible` for anything else.
-    public static func open(mailRoot: URL) throws -> EnvelopeIndexSnapshot {
+    public static func open(mailRoot: URL, inPlace: Bool = true) throws -> EnvelopeIndexSnapshot {
         let source = AppleMailAccess.envelopeIndexURL(mailRoot: mailRoot)
         switch FDAStatus.probe(path: source.path) {
         case .denied: throw Mail42Error.fdaDenied
@@ -46,6 +60,28 @@ public final class EnvelopeIndexSnapshot {
         case .granted, .undetermined: break
         }
 
+        if inPlace, let connection = try? openInPlace(source) {
+            return EnvelopeIndexSnapshot(mailRoot: mailRoot, connection: connection, directory: nil)
+        }
+        return try openCopy(mailRoot: mailRoot, source: source)
+    }
+
+    /// A read-only connection on Mail's own file. The schema read at the end proves the connection works (a WAL
+    /// database whose `-shm` can't be opened fails there, not at `sqlite3_open`).
+    private static func openInPlace(_ source: URL) throws -> SQLiteConnection {
+        let connection = try SQLiteConnection(path: source.path, readOnly: true)
+        do {
+            guard try !connection.columns(of: "messages").isEmpty else {
+                throw Mail42Error.databaseNotAccessible("\(source.path): no messages table")
+            }
+            return connection
+        } catch {
+            connection.close()
+            throw error
+        }
+    }
+
+    private static func openCopy(mailRoot: URL, source: URL) throws -> EnvelopeIndexSnapshot {
         let fm = FileManager.default
         let directory = fm.temporaryDirectory
             .appendingPathComponent("mail42-\(getpid())-\(UUID().uuidString)", isDirectory: true)
@@ -72,12 +108,44 @@ public final class EnvelopeIndexSnapshot {
         }
     }
 
-    /// Closes the connection and deletes the temp copy. Safe to call twice.
+    /// Closes the connection and deletes the fallback copy, if there is one (Apple Mail's own file is never touched).
+    /// Safe to call twice.
     public func close() {
         guard !closed else { return }
         closed = true
         connection.close()
-        try? FileManager.default.removeItem(at: directory)
+        if let directory { try? FileManager.default.removeItem(at: directory) }
+    }
+
+    // MARK: - Stale copies
+
+    /// The folder name prefix of a fallback copy: `mail42-<pid>-<uuid>`.
+    static let copyPrefix = "mail42-"
+
+    /// The process id a copy folder was made by, or nil when the name isn't one of ours.
+    static func owner(ofCopyNamed name: String) -> pid_t? {
+        guard name.hasPrefix(copyPrefix) else { return nil }
+        let rest = name.dropFirst(copyPrefix.count)
+        guard let dash = rest.firstIndex(of: "-"), let pid = pid_t(rest[rest.startIndex..<dash]), pid > 0 else { return nil }
+        return pid
+    }
+
+    /// Removes the fallback copies in `directory` whose process no longer runs (it was killed before it could
+    /// close). A copy whose process is alive, and anything that isn't a `mail42-<pid>-…` folder, is left alone.
+    /// - Returns: how many folders were removed.
+    @discardableResult
+    public static func removeStaleCopies(
+        in directory: URL = FileManager.default.temporaryDirectory,
+        isRunning: (pid_t) -> Bool = { kill($0, 0) == 0 || errno == EPERM }
+    ) -> Int {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: directory.path) else { return 0 }
+        var removed = 0
+        for name in names {
+            guard let pid = owner(ofCopyNamed: name), !isRunning(pid) else { continue }
+            if (try? fm.removeItem(at: directory.appendingPathComponent(name))) != nil { removed += 1 }
+        }
+        return removed
     }
 
     // MARK: - Schema

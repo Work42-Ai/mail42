@@ -2,8 +2,8 @@
 //
 // mail42 used to copy every message's headers and text into its own database (a multi-minute first sync and a second
 // copy of the user's mail on disk). Everything the list needs is already in Apple Mail's Envelope Index, so this
-// reads it directly: `LiveMail.open()` takes a private snapshot of the index (an APFS clone, so it costs next to
-// nothing; Apple's files are never opened for writing) and answers questions about it.
+// reads it directly: `LiveMail.open()` opens the index read-only, in place (Apple's files are never opened for
+// writing, and nothing is copied; see `EnvelopeIndexSnapshot` for the one fallback) and answers questions about it.
 //
 // Things that are specific to how Apple stores mail, and that this layer owns:
 //   · A Gmail account keeps every message in [Gmail]/All Mail; Inbox, Important and every other label are rows in the
@@ -27,8 +27,8 @@ public final class LiveMail {
     private let capabilities: EnvelopeIndexSnapshot.Capabilities
     private let hasLabels: Bool
     private let accountInfo: [String: AccountDirectory.Info]
-    private let mailboxRows: [MailboxRow]
-    private let mailboxByID: [Int64: MailboxRow]
+    private var mailboxRows: [MailboxRow]
+    private var mailboxByID: [Int64: MailboxRow]
 
     /// Mailboxes with at most this many messages are listed by sorting their members; bigger ones by walking the
     /// date index and testing membership (which stops as soon as the page is full).
@@ -68,21 +68,39 @@ public final class LiveMail {
         let labelColumns = try snapshot.connection.columns(of: "labels")
         self.hasLabels = labelColumns.contains("message_id") && labelColumns.contains("mailbox_id")
 
+        let rows = try Self.readMailboxRows(snapshot.connection)
+        self.mailboxRows = rows
+        self.mailboxByID = Self.index(rows)
+    }
+
+    private static func readMailboxRows(_ connection: SQLiteConnection) throws -> [MailboxRow] {
         var rows: [MailboxRow] = []
-        try snapshot.connection.query("SELECT ROWID, url, total_count, unread_count FROM mailboxes") { row in
+        try connection.query("SELECT ROWID, url, total_count, unread_count FROM mailboxes") { row in
             guard let url = row.text(1), let parsed = MailboxURL.decode(url) else { return }
             let name = parsed.pathComponents.joined(separator: "/")
             rows.append(MailboxRow(
                 id: row.int(0), accountID: parsed.accountUUID, name: name, role: MailboxRole.classify(name: name),
                 url: url, total: row.int(2), unread: row.int(3)))
         }
-        self.mailboxRows = rows
-        self.mailboxByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return rows
+    }
+
+    private static func index(_ rows: [MailboxRow]) -> [Int64: MailboxRow] {
+        Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Reads the mailboxes and their counters again. The index is read in place, so a `LiveMail` that stays open
+    /// (the `serve` daemon) sees new mail in every query but would keep the mailbox list and counters it read
+    /// when it opened, until this is called. Not safe to call while another thread is using this object.
+    public func reloadMailboxes() throws {
+        let rows = try Self.readMailboxRows(snapshot.connection)
+        mailboxRows = rows
+        mailboxByID = Self.index(rows)
     }
 
     deinit { snapshot.close() }
 
-    /// Releases the snapshot early (it is also released when this object goes away).
+    /// Releases the connection early (it is also released when this object goes away).
     public func close() { snapshot.close() }
 
     // MARK: - Accounts and mailboxes

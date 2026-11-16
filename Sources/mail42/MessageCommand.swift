@@ -10,18 +10,18 @@ import Mail42Kit
 
 enum MessageCommand {
 
-    static func run(args: [String]) {
+    static func run(args: [String]) throws {
         let json = CLI.wantsJSON(args)
         let words = CLI.positionals(args, valueFlags: ["--out", "--prefer-mailbox"])
         switch words.first {
         case "read":
-            read(args: args, words: words, json: json)
+            try read(args: args, words: words, json: json)
         case "thread":
-            thread(words: words, json: json)
+            try thread(words: words, json: json)
         case "resolve":
-            resolve(args: args, words: words, json: json)
+            try resolve(args: args, words: words, json: json)
         default:
-            CLI.usageError(
+            try CLI.usageError(
                 "usage: message read <id> [--text|--html|--headers] [--out <file>] | message thread <id> | message resolve <link|id> [--prefer-mailbox <id>]",
                 json: json)
         }
@@ -30,36 +30,36 @@ enum MessageCommand {
     // MARK: - resolve
 
     /// Finds the message a `mail42://message/…` link points at, even after Mail moved it and gave it a new id.
-    private static func resolve(args: [String], words: [String], json: Bool) {
+    private static func resolve(args: [String], words: [String], json: Bool) throws {
         guard let text = words.dropFirst().first, let link = MessageLink(string: text) else {
-            CLI.usageError("usage: message resolve <mail42://message/… link | id> [--prefer-mailbox <id>]", json: json)
+            try CLI.usageError("usage: message resolve <mail42://message/… link | id> [--prefer-mailbox <id>]", json: json)
         }
         var preferred: Int64?
         if let value = CLI.argValue(args, "--prefer-mailbox") {
-            guard let id = Int64(value) else { CLI.usageError("--prefer-mailbox takes a mailbox id, not `\(value)`", json: json) }
+            guard let id = Int64(value) else { try CLI.usageError("--prefer-mailbox takes a mailbox id, not `\(value)`", json: json) }
             preferred = id
         }
         do {
             let record = try LiveMail.open().resolve(link, preferMailbox: preferred)
             if json {
-                CLI.emitJSONObject(Presentation.envelope(record))
+                try CLI.emitJSONObject(Presentation.envelope(record))
             } else {
-                EnvelopeCommand.show([record], json: false)
+                try EnvelopeCommand.show([record], json: false)
                 print(record.link.string)
             }
         } catch {
-            CLI.fail(error: error, json: json)
+            try CLI.fail(error: error, json: json)
         }
     }
 
     // MARK: - thread
 
-    private static func thread(words: [String], json: Bool) {
-        let id = CLI.messageID(words.dropFirst().first, json: json)
+    private static func thread(words: [String], json: Bool) throws {
+        let id = try CLI.messageID(words.dropFirst().first, json: json)
         do {
-            EnvelopeCommand.show(try LiveMail.open().thread(containing: id), json: json)
+            try EnvelopeCommand.show(try LiveMail.open().thread(containing: id), json: json)
         } catch {
-            CLI.fail(error: error, json: json)
+            try CLI.fail(error: error, json: json)
         }
     }
 
@@ -67,13 +67,13 @@ enum MessageCommand {
 
     private enum Mode { case text, html, headers }
 
-    private static func read(args: [String], words: [String], json: Bool) {
-        let id = CLI.messageID(words.dropFirst().first, json: json)
+    private static func read(args: [String], words: [String], json: Bool) throws {
+        let id = try CLI.messageID(words.dropFirst().first, json: json)
         let requested: [Mode] = [args.contains("--text") ? .text : nil,
                                  args.contains("--html") ? .html : nil,
                                  args.contains("--headers") ? .headers : nil].compactMap { $0 }
         guard requested.count <= 1 else {
-            CLI.usageError("choose one of --text, --html, --headers", json: json)
+            try CLI.usageError("choose one of --text, --html, --headers", json: json)
         }
         let mode = requested.first ?? .text
 
@@ -99,7 +99,7 @@ enum MessageCommand {
                 return
             }
             if json {
-                CLI.emitJSONObject([
+                try CLI.emitJSONObject([
                     "envelope": Presentation.envelope(record),
                     "headers": headers,
                     "text": mode == .text ? (content as Any? ?? NSNull()) : NSNull(),
@@ -112,7 +112,7 @@ enum MessageCommand {
                            headers: headers, unavailable: body.unavailable)
             }
         } catch {
-            CLI.fail(error: error, json: json)
+            try CLI.fail(error: error, json: json)
         }
     }
 
@@ -152,7 +152,7 @@ enum MessageCommand {
         let text = mode == .headers ? headerLines(headers) : content
         guard let text, !(unavailable && mode != .headers) else {
             if json {
-                CLI.emitJSONObject(["path": NSNull(), "body_unavailable": true] as [String: Any])
+                try CLI.emitJSONObject(["path": NSNull(), "body_unavailable": true] as [String: Any])
             } else {
                 print("The full message isn't available (not downloaded). Open it in Mail with `mail42 open <id>`.")
             }
@@ -167,7 +167,7 @@ enum MessageCommand {
             throw Mail42Error.writeFailed("\(url.path): \(error.localizedDescription)")
         }
         if json {
-            CLI.emitJSONObject(["path": url.path, "body_unavailable": false] as [String: Any])
+            try CLI.emitJSONObject(["path": url.path, "body_unavailable": false] as [String: Any])
         } else {
             print(url.path)
         }
