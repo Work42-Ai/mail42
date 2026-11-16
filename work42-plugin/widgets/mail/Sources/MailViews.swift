@@ -23,6 +23,8 @@ private extension Notification.Name {
 struct MailBody: View {
     let model: MailModel
     let services: SessionServices
+    /// This tile's place among the tiles that keep the shared model working.
+    @State private var owner = UUID()
 
     var body: some View {
         Group {
@@ -52,8 +54,8 @@ struct MailBody: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // Loading → ready (or into setup) settles in instead of snapping.
         .animation(.easeInOut(duration: 0.3), value: model.state)
-        .task { model.start(services: services) }
-        .onDisappear { model.stop() }
+        .task { model.attach(owner: owner, services: services) }
+        .onDisappear { model.detach(owner: owner) }
         // A switch flipped in System Settings shows up as soon as the user is back.
         .onReceive(NotificationCenter.default.publisher(for: .appDidBecomeActive)) { _ in
             model.recheckNow()

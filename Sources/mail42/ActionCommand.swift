@@ -33,7 +33,7 @@ enum ActionCommand {
 
     private static let valueFlags: Set<String> = ["--color", "--to", "--cc", "--subject", "--body"]
 
-    static func run(command: String, args: [String]) {
+    static func run(command: String, args: [String]) throws {
         let json = CLI.wantsJSON(args)
         let words = CLI.positionals(args, valueFlags: valueFlags)
         let recorder = ScriptRecorder()
@@ -46,10 +46,10 @@ enum ActionCommand {
             case "delete": try delete(words, actions, recorder, json)
             case "junk": try junk(words, actions, recorder, json)
             case "draft": try draft(words, args, actions, recorder, json)
-            default: CLI.usageError("unknown action `\(command)`", json: json)
+            default: try CLI.usageError("unknown action `\(command)`", json: json)
             }
         } catch {
-            CLI.fail(error: error, json: json)
+            try CLI.fail(error: error, json: json)
         }
     }
 
@@ -57,7 +57,7 @@ enum ActionCommand {
 
     private static func mark(_ words: [String], _ args: [String], _ actions: MailActions, _ recorder: ScriptRecorder, _ json: Bool) throws {
         guard words.count >= 2 else {
-            CLI.usageError("usage: mark <id|link> read|unread|flagged|unflagged [--color red|orange|yellow|green|blue|purple|gray]", json: json)
+            try CLI.usageError("usage: mark <id|link> read|unread|flagged|unflagged [--color red|orange|yellow|green|blue|purple|gray]", json: json)
         }
         let state: MarkState
         switch words[1].lowercased() {
@@ -68,27 +68,27 @@ enum ActionCommand {
             var color: FlagColor?
             if let name = CLI.argValue(args, "--color") {
                 guard let known = FlagColor(rawValue: name.lowercased()) else {
-                    CLI.usageError("--color is one of \(FlagColor.allCases.map(\.rawValue).joined(separator: ", ")), not `\(name)`", json: json)
+                    try CLI.usageError("--color is one of \(FlagColor.allCases.map(\.rawValue).joined(separator: ", ")), not `\(name)`", json: json)
                 }
                 color = known
             }
             state = .flagged(color)
         default:
-            CLI.usageError("mark takes read, unread, flagged or unflagged, not `\(words[1])`", json: json)
+            try CLI.usageError("mark takes read, unread, flagged or unflagged, not `\(words[1])`", json: json)
         }
         let (mail, record) = try target(words.first, json: json)
         let says = try actions.mark(scriptingRef(record, in: mail), as: state)
-        finish(action: "mark", record: record, link: record.link, recorder: recorder, json: json,
+        try finish(action: "mark", record: record, link: record.link, recorder: recorder, json: json,
                text: "Marked message \(record.row.id) as \(words[1].lowercased()).",
                extra: says.isEmpty ? [:] : ["mail_says": says])
     }
 
     private static func move(_ words: [String], _ actions: MailActions, _ recorder: ScriptRecorder, _ json: Bool) throws {
-        guard words.count >= 2 else { CLI.usageError("usage: move <id|link> <mailbox id|name>", json: json) }
+        guard words.count >= 2 else { try CLI.usageError("usage: move <id|link> <mailbox id|name>", json: json) }
         let (mail, record) = try target(words.first, json: json)
         let box = try mailbox(matching: words[1], in: mail, for: record)
         try actions.move(scriptingRef(record, in: mail), toMailbox: path(of: box))
-        finish(action: "move", record: record, link: settledLink(record, mail: mail, preferring: box.id), recorder: recorder, json: json,
+        try finish(action: "move", record: record, link: settledLink(record, mail: mail, preferring: box.id), recorder: recorder, json: json,
                text: "Moved message \(record.row.id) to \(box.name).")
     }
 
@@ -97,7 +97,7 @@ enum ActionCommand {
         let box = accountMailboxes(of: record, in: mail).filter { $0.role == "archive" }
             .sorted { ($0.name.hasPrefix("[Gmail]") ? 0 : 1) < ($1.name.hasPrefix("[Gmail]") ? 0 : 1) }.first
         try actions.archive(scriptingRef(record, in: mail), archivePath: box.map(path(of:)))
-        finish(action: "archive", record: record, link: settledLink(record, mail: mail, preferring: box?.id), recorder: recorder, json: json,
+        try finish(action: "archive", record: record, link: settledLink(record, mail: mail, preferring: box?.id), recorder: recorder, json: json,
                text: "Archived message \(record.row.id).")
     }
 
@@ -105,7 +105,7 @@ enum ActionCommand {
         let (mail, record) = try target(words.first, json: json)
         try actions.delete(scriptingRef(record, in: mail))
         let trash = accountMailboxes(of: record, in: mail).first { $0.role == "trash" }
-        finish(action: "delete", record: record, link: settledLink(record, mail: mail, preferring: trash?.id), recorder: recorder, json: json,
+        try finish(action: "delete", record: record, link: settledLink(record, mail: mail, preferring: trash?.id), recorder: recorder, json: json,
                text: "Moved message \(record.row.id) to the Trash.")
     }
 
@@ -113,28 +113,28 @@ enum ActionCommand {
         let (mail, record) = try target(words.first, json: json)
         let box = accountMailboxes(of: record, in: mail).first { $0.role == "junk" }
         try actions.junk(scriptingRef(record, in: mail), junkPath: box.map(path(of:)))
-        finish(action: "junk", record: record, link: settledLink(record, mail: mail, preferring: box?.id), recorder: recorder, json: json,
+        try finish(action: "junk", record: record, link: settledLink(record, mail: mail, preferring: box?.id), recorder: recorder, json: json,
                text: "Marked message \(record.row.id) as junk.")
     }
 
     private static func draft(_ words: [String], _ args: [String], _ actions: MailActions, _ recorder: ScriptRecorder, _ json: Bool) throws {
         let usage = "usage: draft reply|reply-all|forward <id|link> | draft new [--to <addr>] [--cc <addr>] [--subject <text>] [--body <text>]"
-        guard let kind = words.first else { CLI.usageError(usage, json: json) }
+        guard let kind = words.first else { try CLI.usageError(usage, json: json) }
         switch kind {
         case "new":
             try actions.draftNew(
                 to: CLI.argValues(args, "--to"), cc: CLI.argValues(args, "--cc"),
                 subject: CLI.argValue(args, "--subject"), body: CLI.argValue(args, "--body"))
-            finish(action: "draft new", record: nil, link: nil, recorder: recorder, json: json,
+            try finish(action: "draft new", record: nil, link: nil, recorder: recorder, json: json,
                    text: "Opened a new message in Mail. Nothing is sent until you press Send there.")
         case "reply", "reply-all", "forward":
             let (mail, record) = try target(words.dropFirst().first, json: json)
             let ref = try scriptingRef(record, in: mail)
             if kind == "forward" { try actions.draftForward(ref) } else { try actions.draftReply(ref, all: kind == "reply-all") }
-            finish(action: "draft \(kind)", record: record, link: record.link, recorder: recorder, json: json,
+            try finish(action: "draft \(kind)", record: record, link: record.link, recorder: recorder, json: json,
                    text: "Opened a \(kind) draft in Mail. Nothing is sent until you press Send there.")
         default:
-            CLI.usageError(usage, json: json)
+            try CLI.usageError(usage, json: json)
         }
     }
 
@@ -143,7 +143,7 @@ enum ActionCommand {
     /// The message an id or link names.
     private static func target(_ argument: String?, json: Bool) throws -> (LiveMail, EnvelopeRecord) {
         guard let argument, let link = MessageLink(string: argument) else {
-            CLI.usageError("expected a message id or a mail42://message/… link", json: json)
+            try CLI.usageError("expected a message id or a mail42://message/… link", json: json)
         }
         let mail = try LiveMail.open()
         return (mail, try mail.resolve(link))
@@ -198,13 +198,13 @@ enum ActionCommand {
     private static func finish(
         action: String, record: EnvelopeRecord?, link: MessageLink?, recorder: ScriptRecorder, json: Bool, text: String,
         extra: [String: Any] = [:]
-    ) {
+    ) throws {
         if json {
             var result: [String: Any] = ["ok": true, "action": action].merging(extra) { first, _ in first }
             if let record { result["id"] = record.row.id }
             if let link { result["link"] = link.string }
             if dryRun { result["dry_run"] = true; result["scripts"] = recorder.recorded }
-            CLI.emitJSONObject(result)
+            try CLI.emitJSONObject(result)
         } else if dryRun {
             print(recorder.recorded.joined(separator: "\n\n"))
         } else {

@@ -59,11 +59,16 @@ final class MailWidget: Work42Widget, Work42WidgetCustomHeader {
     }
 
     func activate(services: SessionServices) {
-        model.start(services: services)
+        // The model is shared by every Mail tile, and it works only while one is on screen: each tile attaches when it
+        // appears and detaches when it goes (MailBody), so closing one never stops the model for another. Activating
+        // only tells it whose services a link or a header button can use.
+        model.adopt(services: services)
     }
 
     func deactivate() {
-        model.stop()
+        // The reader's web view (and its web-content process) belongs to this instance; the host runs this inside the
+        // instance's cache scope, so the key below reaches this instance's surface and no other.
+        BrowserSurfaceCache.shared.teardown(key: MailReaderSurface.cacheKey)
     }
 
     func makeView(services: SessionServices) -> AnyView {

@@ -9,27 +9,27 @@ import Mail42Kit
 
 enum AttachmentCommand {
 
-    static func run(args: [String]) {
+    static func run(args: [String]) throws {
         let json = CLI.wantsJSON(args)
         let words = CLI.positionals(args, valueFlags: ["--to"])
         switch words.first {
         case "list":
-            list(words: words, json: json)
+            try list(words: words, json: json)
         case "save":
-            save(args: args, words: words, json: json)
+            try save(args: args, words: words, json: json)
         default:
-            CLI.usageError("usage: attachment list <id> | attachment save <id> <part> [--to <dir>]", json: json)
+            try CLI.usageError("usage: attachment list <id> | attachment save <id> <part> [--to <dir>]", json: json)
         }
     }
 
-    private static func list(words: [String], json: Bool) {
-        let id = CLI.messageID(words.dropFirst().first, json: json)
+    private static func list(words: [String], json: Bool) throws {
+        let id = try CLI.messageID(words.dropFirst().first, json: json)
         do {
             let mail = try LiveMail.open()
             guard let record = try mail.envelopeRecord(id: id) else { throw Mail42Error.notFound("message \(id)") }
             let attachments = try mail.attachments(of: record)
             if json {
-                CLI.emitJSONObject(attachments.map(Presentation.attachment))
+                try CLI.emitJSONObject(attachments.map(Presentation.attachment))
             } else if attachments.isEmpty {
                 print("No attachments.")
             } else {
@@ -39,13 +39,13 @@ enum AttachmentCommand {
                 }
             }
         } catch {
-            CLI.fail(error: error, json: json)
+            try CLI.fail(error: error, json: json)
         }
     }
 
-    private static func save(args: [String], words: [String], json: Bool) {
-        let id = CLI.messageID(words.dropFirst().first, json: json)
-        guard words.count >= 3 else { CLI.usageError("usage: attachment save <id> <part> [--to <dir>]", json: json) }
+    private static func save(args: [String], words: [String], json: Bool) throws {
+        let id = try CLI.messageID(words.dropFirst().first, json: json)
+        guard words.count >= 3 else { try CLI.usageError("usage: attachment save <id> <part> [--to <dir>]", json: json) }
         let part = words[2]
         let directory = CLI.argValue(args, "--to").map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
             ?? FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
@@ -72,12 +72,12 @@ enum AttachmentCommand {
             let saved = try AttachmentSaver.save(
                 attachment.data, suggestedName: attachment.filename, fallbackName: "attachment-\(part)", into: directory)
             if json {
-                CLI.emitJSONObject(["path": saved.path, "bytes": attachment.data.count] as [String: Any])
+                try CLI.emitJSONObject(["path": saved.path, "bytes": attachment.data.count] as [String: Any])
             } else {
                 print(saved.path)
             }
         } catch {
-            CLI.fail(error: error, json: json)
+            try CLI.fail(error: error, json: json)
         }
     }
 }

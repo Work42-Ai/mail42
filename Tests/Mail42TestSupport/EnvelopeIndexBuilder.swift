@@ -152,6 +152,13 @@ public final class EnvelopeIndexBuilder {
             [.int(id), .text(url), .int(total), .int(unread)]) { _ in }
     }
 
+    /// Moves a mailbox's counters, as Mail does when mail arrives, is read, flagged, moved or deleted.
+    public func setMailboxCounts(id: Int64, total: Int64, unread: Int64) throws {
+        try conn.query(
+            "UPDATE mailboxes SET total_count = ?, unread_count = ? WHERE ROWID = ?",
+            [.int(total), .int(unread), .int(id)]) { _ in }
+    }
+
     public func addMessage(_ message: Message) throws {
         var columns: [(String, SQLiteValue)] = [
             ("ROWID", .int(message.rowid)),

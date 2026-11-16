@@ -7,15 +7,15 @@ import Mail42Kit
 
 enum MailboxCommand {
 
-    static func run(args: [String]) {
+    static func run(args: [String]) throws {
         let json = CLI.wantsJSON(args)
         guard CLI.positionals(args).first == "list" else {
-            CLI.usageError("usage: mailbox list [--json]", json: json)
+            try CLI.usageError("usage: mailbox list [--json]", json: json)
         }
         do {
             let tree = try LiveMail.open().accountsWithMailboxes()
             if json {
-                CLI.emitJSONObject(tree.map { entry in
+                try CLI.emitJSONObject(tree.map { entry in
                     [
                         "account": [
                             "id": entry.account.id, "name": entry.account.name,
@@ -42,7 +42,7 @@ enum MailboxCommand {
                 print("")
             }
         } catch {
-            CLI.fail(error: error, json: json)
+            try CLI.fail(error: error, json: json)
         }
     }
 }

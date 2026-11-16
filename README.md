@@ -60,12 +60,26 @@ waits for the answer; `--check` only reports `granted`, `denied` or `not_determi
 
 | Path | What |
 |---|---|
-| `~/Library/Mail/V*/` | Apple Mail's own store. **Only ever read**, never written (mail42 reads a private snapshot of the index, so a running Mail is never disturbed) |
+| `~/Library/Mail/V*/` | Apple Mail's own store. **Only ever read**, never written: the index is opened read-only, in place, with short reads that never hold a lock Mail would wait for |
 | `~/Library/Accounts/Accounts4.sqlite` | Read, to name accounts as Mail does |
 | `~/.work42/mail42/reader/` | The Mail42 tile's disposable files (the message being shown); nothing else is kept |
+| `~/.work42/mail42/serve.*` | The service's socket, lock and log (see below) |
 
 Everything that changes mail goes through Mail.app as Apple Events: Mail does it, syncs it to the server and updates its
 own index. mail42 holds no passwords and no copy of your mail.
+
+## The service
+
+`mail42 serve` is one background process per user that keeps Mail's index open and answers every client at once: the Mail
+widget, the Work42 Mac app (for the iPad) and the commands below. Actions that drive Mail go through it one at a time, so a
+busy Mail never holds up reading, and it tells the widget when Mail changed instead of being asked again and again.
+
+You never need to start it: the widget and Work42 do (`mail42 serve --detach`), it exits by itself after ten idle minutes,
+and every command uses it when it is running and works alone when it isn't, with the same output either way
+(`MAIL42_NO_SERVE=1` forces working alone). The protocol is in [docs/serve-protocol.md](docs/serve-protocol.md).
+
+New in 0.3.0: the service; the index is read in place instead of copied (the copy is only a fallback); a run that was killed
+no longer leaves a copy behind.
 
 ## Reading mail
 

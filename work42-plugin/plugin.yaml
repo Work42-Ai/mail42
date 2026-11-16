@@ -1,6 +1,6 @@
 manifest_version: 2
 name: mail42
-version: 0.2.0
+version: 0.3.0
 description: >
   Read-only local email for you and your agents. Provides the Mail widget (a lightweight reader over every Apple
   Mail account, with highlight-to-comment and a background sync) on top of the standalone `mail42` tool

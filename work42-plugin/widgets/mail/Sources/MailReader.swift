@@ -379,8 +379,8 @@ private struct MailBodyView: View {
             Color.clear
         case .loading:
             ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
-        case .ready(let id, let url, let key):
-            MailWebBody(model: model, services: services, id: id, url: url, key: key)
+        case .ready(let id, let url, _):
+            MailWebBody(model: model, services: services, id: id, url: url)
         #if os(iOS)
         case .readyHTML(_, let html, let key):
             MailHTMLBody(html: html).id(key)
@@ -402,17 +402,25 @@ private struct MailBodyView: View {
     }
 }
 
+/// The one web view a Mail tile reads messages in. Its cache key is the same for every message (the host scopes it to the
+/// widget instance), so opening another message navigates this web view instead of making a new one with its own
+/// web-content process; `MailWidget.deactivate` tears it down.
+enum MailReaderSurface {
+    static let cacheKey = "mail42-reader"
+}
+
 private struct MailWebBody: View {
     let model: MailModel
     let services: SessionServices
     let id: Int64
     let url: URL
-    let key: String
+    @Environment(\.widgetCacheScope) private var scope
 
     var body: some View {
         BrowserSurface(
+            // `url` loads the first message; a later one is shown by `showCurrent` below.
             spec: BrowserSurfaceSpec(url: url, dataStoreKey: "mail42-reader", title: "Mail42", icon: "envelope"),
-            cacheKey: key,
+            cacheKey: MailReaderSurface.cacheKey,
             services: services,
             selectionResolver: { [weak model] _ in
                 guard let envelope = model?.expandedEnvelope else { return nil }
@@ -422,7 +430,16 @@ private struct MailWebBody: View {
             }
         )
         .browserChromeHostOwned(true)
-        .id(key)
+        .onAppear { showCurrent() }
+        .onChange(of: url) { showCurrent() }
+    }
+
+    /// Points the live web view at this message. A web view that doesn't exist yet is built on `url`.
+    private func showCurrent() {
+        guard let browser = BrowserSurface.model(forKey: MailReaderSurface.cacheKey, scope: scope),
+              let tab = browser.activeTabId ?? browser.tabs.first?.id
+        else { return }
+        browser.show(url, inTab: tab)
     }
 }
 

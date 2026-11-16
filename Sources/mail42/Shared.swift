@@ -5,6 +5,10 @@
 //
 // Exit codes: 0 ok · 1 failed or not granted (Full Disk Access, unsupported Apple Mail schema) ·
 //             2 usage, store, not-found or bad-query error.
+//
+// A verb never calls `exit`: the `fail` helpers write the message and throw `VerbExit(status:)`, which ends the
+// verb and carries the exit status to `VerbRunner` (see Output.swift). `fail` has the type `throws -> Never`, so
+// `guard … else { try CLI.fail(…) }` still reads as a dead end.
 
 import Foundation
 import Mail42Kit
@@ -14,26 +18,26 @@ enum CLI {
     // MARK: - stderr diagnostics
 
     static func warn(_ message: String) {
-        FileHandle.standardError.write(Data("\(message)\n".utf8))
+        Output.writeError("\(message)\n")
     }
 
-    /// Prints a plain message to stderr and exits.
-    static func fail(_ message: String, code: Int32 = 1) -> Never {
+    /// Prints a plain message to stderr and ends the verb with `code`.
+    static func fail(_ message: String, code: Int32 = 1) throws -> Never {
         warn(message)
-        exit(code)
+        throw VerbExit(status: code)
     }
 
-    /// Prints an error and exits. With `--json` the error is `{"error":{"code","message"}}` on stdout so
+    /// Prints an error and ends the verb. With `--json` the error is `{"error":{"code","message"}}` on stdout so
     /// agents can parse it; otherwise it is plain text on stderr.
-    static func fail(code errorCode: String, message: String, exit exitCode: Int32, json: Bool) -> Never {
+    static func fail(code errorCode: String, message: String, exit exitCode: Int32, json: Bool) throws -> Never {
         if json {
             let payload = ErrorEnvelope(error: ErrorBody(code: errorCode, message: message))
             if let data = try? jsonEncoder().encode(payload), let text = String(data: data, encoding: .utf8) {
                 print(text)
             }
-            exit(exitCode)
+            throw VerbExit(status: exitCode)
         }
-        fail("mail42: \(message) (\(errorCode))", code: exitCode)
+        try fail("mail42: \(message) (\(errorCode))", code: exitCode)
     }
 
     private struct ErrorEnvelope: Encodable { let error: ErrorBody }
@@ -49,12 +53,14 @@ enum CLI {
         }
     }
 
-    /// Prints any error the way every verb should and exits.
-    static func fail(error: Error, json: Bool) -> Never {
+    /// Prints any error the way every verb should and ends the verb. A `VerbExit` that is already on its way
+    /// out (thrown inside a `do` whose `catch` calls this) passes through untouched.
+    static func fail(error: Error, json: Bool) throws -> Never {
+        if let exit = error as? VerbExit { throw exit }
         if let error = error as? Mail42Error {
-            fail(code: error.code, message: error.localizedDescription, exit: exitCode(for: error), json: json)
+            try fail(code: error.code, message: error.localizedDescription, exit: exitCode(for: error), json: json)
         }
-        fail(code: "error", message: error.localizedDescription, exit: 2, json: json)
+        try fail(code: "error", message: error.localizedDescription, exit: 2, json: json)
     }
 
     // MARK: - Arg parsing
@@ -99,34 +105,34 @@ enum CLI {
     }
 
     /// A whole-number flag value, or a usage error. `nil` when the flag is absent.
-    static func intFlag(_ args: [String], _ name: String, min: Int = 0, json: Bool) -> Int? {
+    static func intFlag(_ args: [String], _ name: String, min: Int = 0, json: Bool) throws -> Int? {
         guard let raw = argValue(args, name) else { return nil }
         guard let value = Int(raw), value >= min else {
-            fail(code: "usage", message: "\(name) takes a whole number of \(min) or more, not `\(raw)`", exit: 2, json: json)
+            try fail(code: "usage", message: "\(name) takes a whole number of \(min) or more, not `\(raw)`", exit: 2, json: json)
         }
         return value
     }
 
     /// The message id argument, or a usage error.
-    static func messageID(_ raw: String?, json: Bool) -> Int64 {
+    static func messageID(_ raw: String?, json: Bool) throws -> Int64 {
         guard let raw, let id = Int64(raw), id > 0 else {
-            fail(code: "usage", message: "expected a message id (a number from `envelope list`)", exit: 2, json: json)
+            try fail(code: "usage", message: "expected a message id (a number from `envelope list`)", exit: 2, json: json)
         }
         return id
     }
 
-    static func usageError(_ message: String, json: Bool) -> Never {
-        fail(code: "usage", message: message, exit: 2, json: json)
+    static func usageError(_ message: String, json: Bool) throws -> Never {
+        try fail(code: "usage", message: message, exit: 2, json: json)
     }
 
     /// Prints a JSON value built from dictionaries / arrays / strings / numbers / `NSNull`: sorted keys, readable.
-    static func emitJSONObject(_ value: Any) {
+    static func emitJSONObject(_ value: Any) throws {
         do {
             let data = try JSONSerialization.data(
                 withJSONObject: value, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
             print(String(decoding: data, as: UTF8.self))
         } catch {
-            fail("mail42: JSON encoding failed: \(error)", code: 2)
+            try fail("mail42: JSON encoding failed: \(error)", code: 2)
         }
     }
 
@@ -139,12 +145,12 @@ enum CLI {
         return e
     }
 
-    static func emitJSON<T: Encodable>(_ value: T) {
+    static func emitJSON<T: Encodable>(_ value: T) throws {
         do {
             let data = try jsonEncoder().encode(value)
             print(String(data: data, encoding: .utf8) ?? "null")
         } catch {
-            fail("mail42: JSON encoding failed: \(error)", code: 2)
+            try fail("mail42: JSON encoding failed: \(error)", code: 2)
         }
     }
 }
