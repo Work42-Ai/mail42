@@ -65,6 +65,9 @@ nonisolated final class FakeDaemon: @unchecked Sendable {
         while true {
             let fd = accept(listener, nil, nil)
             if fd < 0 { return }
+            // A write to a client that has gone must fail, not kill the test process with SIGPIPE.
+            var on: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
             lock.withLock { clients.append(fd) }
             Thread.detachNewThread { [self] in serve(fd) }
         }
