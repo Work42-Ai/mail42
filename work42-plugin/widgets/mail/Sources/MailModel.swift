@@ -1050,7 +1050,7 @@ final class MailModel {
     private func evict(_ id: Int64) {
         guard let entry = readerCache.removeValue(forKey: id) else { return }
         readerOrder.removeAll { $0 == id }
-        BrowserSurfaceCache.shared.teardown(key: entry.key)
+        // Only the saved HTML goes: the reader web view is one per tile and outlives every message in it.
         if let file = entry.file { try? FileManager.default.removeItem(at: file) }
     }
 

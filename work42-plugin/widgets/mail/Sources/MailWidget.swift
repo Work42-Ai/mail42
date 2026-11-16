@@ -65,7 +65,11 @@ final class MailWidget: Work42Widget, Work42WidgetCustomHeader {
         model.adopt(services: services)
     }
 
-    func deactivate() {}
+    func deactivate() {
+        // The reader's web view (and its web-content process) belongs to this instance; the host runs this inside the
+        // instance's cache scope, so the key below reaches this instance's surface and no other.
+        BrowserSurfaceCache.shared.teardown(key: MailReaderSurface.cacheKey)
+    }
 
     func makeView(services: SessionServices) -> AnyView {
         AnyView(MailBody(model: model, services: services))
