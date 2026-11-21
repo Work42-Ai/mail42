@@ -10,7 +10,7 @@
 import Foundation
 import Mail42AppleMail
 
-let mail42Version = "0.3.0"
+let mail42Version = "0.3.1"
 
 // `--reexec` is the internal marker of the permission-identity re-launch (Mail42Daemon); verbs never see it.
 let argv = Mail42Daemon.strippingReexec(CommandLine.arguments)

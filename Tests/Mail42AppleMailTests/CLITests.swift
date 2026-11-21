@@ -135,7 +135,7 @@ import Mail42TestSupport
     @Test func versionHelpAndUnknownCommands() throws {
         guard Self.requireBinary() else { return }
         let library = missingLibrary()
-        #expect(try run(["version"], library: library).out == "mail42 v0.3.0\n")
+        #expect(try run(["version"], library: library).out == "mail42 v0.3.1\n")
         #expect(try run(["--version"], library: library).status == 0)
 
         let help = try run(["help"], library: library)
