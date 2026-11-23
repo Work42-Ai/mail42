@@ -414,7 +414,8 @@ private struct MailWebBody: View {
     let services: SessionServices
     let id: Int64
     let url: URL
-    @Environment(\.widgetCacheScope) private var scope
+    /// The reader's tabs as they are now, from `services.browser.tabs`; nil until the surface exists.
+    @State private var browser: BrowserTabsState?
 
     var body: some View {
         BrowserSurface(
@@ -430,16 +431,22 @@ private struct MailWebBody: View {
             }
         )
         .browserChromeHostOwned(true)
+        .task {
+            for await state in services.browser.tabs {
+                browser = state
+                showCurrent()
+            }
+        }
         .onAppear { showCurrent() }
         .onChange(of: url) { showCurrent() }
     }
 
-    /// Points the live web view at this message. A web view that doesn't exist yet is built on `url`.
+    /// Points the live web view at this message. A web view that doesn't exist yet is built on `url`; one already on it is left alone.
     private func showCurrent() {
-        guard let browser = BrowserSurface.model(forKey: MailReaderSurface.cacheKey, scope: scope),
-              let tab = browser.activeTabId ?? browser.tabs.first?.id
+        guard let browser, let tab = browser.activeTabId ?? browser.tabs.first?.id,
+              browser.tabs.first(where: { $0.id == tab })?.url != url
         else { return }
-        browser.show(url, inTab: tab)
+        Task { try? await services.browser.updateTab(tab, title: nil, url: url, icon: nil) }
     }
 }
 
