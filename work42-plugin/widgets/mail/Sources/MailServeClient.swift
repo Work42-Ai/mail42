@@ -17,7 +17,7 @@ import Foundation
 nonisolated final class MailServeClient: MailTransport, @unchecked Sendable {
 
     /// The mail42 version this widget was built with (`work42-plugin/plugin.yaml`); a test keeps the two equal.
-    static let version = "0.3.1"
+    static let version = "0.3.2"
 
     private let version: String
     private let directory: URL
