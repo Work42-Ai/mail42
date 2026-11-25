@@ -17,6 +17,8 @@ nonisolated struct MailCLIResult: Sendable {
 /// Full Disk Access for mail42, as `mail42 permissions` reports it.
 nonisolated enum MailAccess: Sendable {
     case granted, denied, noMailData, notInstalled
+    /// mail42 is there but could not be reached (its service refused, did not start or timed out): what went wrong.
+    case unreachable(String)
 }
 
 nonisolated enum MailCLI {

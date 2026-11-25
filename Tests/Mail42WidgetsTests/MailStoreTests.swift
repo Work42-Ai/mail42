@@ -59,6 +59,15 @@ nonisolated final class FakeTransport: MailTransport, @unchecked Sendable {
     func close() {}
 }
 
+/// A transport whose every request fails with `error`.
+nonisolated final class FailingTransport: MailTransport, @unchecked Sendable {
+    private let error: any Error
+    init(_ error: any Error) { self.error = error }
+    func run(_ arguments: [String]) async throws -> MailCLIResult { throw error }
+    func changes() -> AsyncStream<String> { AsyncStream { $0.finish() } }
+    func close() {}
+}
+
 /// Polls (without blocking a thread) until `condition` holds or `within` passes (thirty seconds by default: a busy full run can hold the pool for a while).
 func eventually(within limit: Duration = .seconds(30), _ condition: @Sendable () -> Bool) async -> Bool {
     let deadline = ContinuousClock.now.advanced(by: limit)
@@ -81,6 +90,26 @@ struct MailStoreTests {
         #expect(result.status == 0)
         let echo = try await store.json(Echo.self, ["mailbox", "list"])
         #expect(echo.echo == "mailbox list --json")
+    }
+
+    @Test("access: a missing command is 'not installed'")
+    func accessNotInstalled() async {
+        let store = MailStore(transport: FailingTransport(MailFailure.notInstalled))
+        guard case .notInstalled = await store.access() else { Issue.record("expected .notInstalled"); return }
+    }
+
+    @Test("access: any other failure says what failed instead of 'not installed'")
+    func accessUnreachable() async {
+        let refused = MailFailure(code: "service_version", message: "Work42's mail42 (0.3.2) is newer than this widget (0.4.0). Update Work42.")
+        guard case .unreachable(let message) = await MailStore(transport: FailingTransport(refused)).access() else {
+            Issue.record("a refusing service must not read as 'not installed'"); return
+        }
+        #expect(message == refused.message)
+
+        guard case .unreachable(let other) = await MailStore(transport: FailingTransport(CancellationError())).access() else {
+            Issue.record("a non-MailFailure error must not read as 'not installed'"); return
+        }
+        #expect(!other.isEmpty)
     }
 
     @Test("the most urgent waiting request starts first, then the earliest")

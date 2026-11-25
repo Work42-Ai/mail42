@@ -103,8 +103,12 @@ actor MailStore {
             if result.status == 0 { return .granted }
             let report = try? JSONDecoder().decode(MailPermissionsReport.self, from: result.stdout)
             return report?.fullDiskAccess == "noMailData" ? .noMailData : .denied
+        } catch let failure as MailFailure {
+            // Only a missing command is "not installed". A service that refuses, runs another version, does not start or times
+            // out is something else, and the tile says what (it used to say "isn't installed" for all of them).
+            return failure.code == MailFailure.notInstalled.code ? .notInstalled : .unreachable(failure.message)
         } catch {
-            return .notInstalled                                      // mail42 can't be reached at all
+            return .unreachable(error.localizedDescription)
         }
     }
 

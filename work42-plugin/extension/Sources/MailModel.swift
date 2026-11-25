@@ -250,6 +250,7 @@ final class MailModel {
         case .notInstalled: state = .notInstalled; waitForAccess()
         case .denied: state = .needsAccess; waitForAccess()
         case .noMailData: state = .noMail; waitForAccess()
+        case .unreachable(let message): state = .failed(message)
         case .granted: await reloadAll()
         }
     }
