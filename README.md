@@ -63,7 +63,7 @@ waits for the answer; `--check` only reports `granted`, `denied` or `not_determi
 | `~/Library/Mail/V*/` | Apple Mail's own store. **Only ever read**, never written: the index is opened read-only, in place, with short reads that never hold a lock Mail would wait for |
 | `~/Library/Accounts/Accounts4.sqlite` | Read, to name accounts as Mail does |
 | `~/.work42/mail42/reader/` | The Mail42 tile's disposable files (the message being shown); nothing else is kept |
-| `~/.work42/mail42/serve.*` | The service's socket, lock and log (see below) |
+| `~/Library/Group Containers/74RFQFPVQ9.com.work42.mail42/serve.*` | The service's socket, lock and log (see below). An app group, so Work42's sandboxed widget can reach the socket |
 
 Everything that changes mail goes through Mail.app as Apple Events: Mail does it, syncs it to the server and updates its
 own index. mail42 holds no passwords and no copy of your mail.

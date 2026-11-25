@@ -161,7 +161,9 @@ final class MailModel {
 
     private static func defaultTransport(services: SessionServices?) -> any MailTransport {
         #if os(macOS)
-        return MailServeClient()
+        // The daemon is started through the Work42 shell, which finds `mail42` on its own PATH.
+        guard let services else { return MailServeClient() }
+        return MailServeClient(startDaemon: MailServeClient.startDaemonCommand(shell: services.shell))
         #else
         guard let services else { return MailUnavailableTransport() }
         let shell = services.shell
@@ -689,12 +691,9 @@ final class MailModel {
             nonisolated struct Saved: Decodable, Sendable { let path: String }
             let saved = try await mailStore.json(
                 Saved.self, ["attachment", "save", String(id), attachment.part, "--to", folder.path], priority: .opened)
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/qlmanage")
-            process.arguments = ["-p", saved.path]
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            try process.run()
+            // `qlmanage -p` stays up until its window is closed, so it is a started command (Work42 stops it with the widget).
+            guard let shell = services?.shell else { throw MailFailure(code: "no_shell", message: "Quick Look needs Work42.") }
+            _ = try await shell.start(command: "qlmanage -p \(MailCLI.quoted(saved.path)) >/dev/null 2>&1")
         } catch {
             report(error, fallback: "Couldn't preview the attachment")
         }
@@ -708,7 +707,7 @@ final class MailModel {
             nonisolated struct Saved: Decodable, Sendable { let path: String }
             let saved = try await mailStore.json(
                 Saved.self, ["attachment", "save", String(id), attachment.part, "--to", downloads], priority: .opened)
-            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: saved.path)])
+            services?.platform.reveal(URL(fileURLWithPath: saved.path))
             show("Saved \(URL(fileURLWithPath: saved.path).lastPathComponent)")
         } catch let failure as MailFailure {
             show(failure.message)
@@ -1011,7 +1010,7 @@ final class MailModel {
 
         private static let hostID = "mail42-reader"
         private static var base: URL {
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".work42/mail42/reader", isDirectory: true)
+            RealHome.url.appendingPathComponent(".work42/mail42/reader", isDirectory: true)
         }
         private static var folder: URL { base.appendingPathComponent("artifacts/\(MailModel.readerArtifactID)", isDirectory: true) }
 

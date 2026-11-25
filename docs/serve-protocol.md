@@ -9,12 +9,18 @@ Mail changed. This file is the contract the three clients are written against.
 
 | What | Where |
 |------|-------|
-| Folder | `~/.work42/mail42/` (mode 0700), or `$MAIL42_SERVE_DIR` |
+| Folder | `~/Library/Group Containers/74RFQFPVQ9.com.work42.mail42/` (mode 0700), or `$MAIL42_SERVE_DIR` |
 | Socket | `serve.sock` (mode 0600), a Unix stream socket |
 | Single-instance lock | `serve.lock` (`flock`): only one daemon holds it |
 | Log | `serve.log` (start, stop, version hand-over), truncated when it passes 1 MB |
 
 Only the owner of the folder can connect, and the daemon also checks the connecting process's user id.
+
+The folder is an **app group's container** (since 0.4.0; before that the daemon listened in `~/.work42/mail42/`). Work42's mail42
+widget is a sandboxed extension: it can connect to a socket in a group container it declares (`app_groups` in its `plugin.yaml`)
+and not to one in a home folder. `mail42.app` is signed with the same group, which also keeps macOS from asking whether mail42 may
+"access data from other apps". The command line, which is not sandboxed, still looks in the old folder when the group's has no
+socket, so it can use a daemon of the old version that is still running; the widget does not.
 
 ## Starting it
 

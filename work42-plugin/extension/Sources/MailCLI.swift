@@ -1,8 +1,9 @@
 // MailCLI.swift — what the widget needs to know about the `mail42` command-line tool, apart from talking to it.
 //
 // Talking to it is `MailStore` over a `MailTransport` (the `mail42 serve` daemon on the Mac, shell calls through the Mac
-// on the iPad). This file keeps the shape of an answer, how a command word is quoted for the Mac's shell, where the
-// installed tool lives, and how a failed answer becomes a `MailFailure`.
+// on the iPad). This file keeps the shape of an answer, how a command word is quoted for the Mac's shell, and how a
+// failed answer becomes a `MailFailure`. Where the tool lives is the host shell's business: `mail42` is run by name and Work42's
+// shell finds it (`~/.work42/bin/mail42`).
 
 import Foundation
 
@@ -29,33 +30,6 @@ nonisolated enum MailCLI {
         if plain, !argument.isEmpty { return argument }
         return "'" + argument.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
-
-    #if os(macOS)
-
-    /// `~/.work42/bin/mail42` (where Work42's installer links the tool), if it exists.
-    static var installedURL: URL? {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".work42/bin/mail42")
-        return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
-    }
-
-    private static func which(_ name: String) -> String? {
-        let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")
-            .split(separator: ":")
-        for dir in paths {
-            let candidate = "\(dir)/\(name)"
-            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
-        }
-        return nil
-    }
-
-    /// The `mail42` that can start the daemon: the installed one, else one on the PATH.
-    static func executableURL() -> URL? {
-        if let installed = installedURL { return installed }
-        return which("mail42").map { URL(fileURLWithPath: $0) }
-    }
-
-    #endif
 
     /// A failed answer as the `MailFailure` it describes: the CLI's own `{"error":{"code","message"}}` when it printed
     /// one, else its stderr, else its exit status.

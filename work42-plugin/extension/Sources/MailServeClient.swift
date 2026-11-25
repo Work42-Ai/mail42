@@ -5,7 +5,7 @@
 // and every wait is an `await` on a continuation or a `Task.sleep`. A request that is cancelled sends `cancel` to the
 // daemon and ends at once with `CancellationError`.
 //
-// The client connects when it is first asked, starts the daemon if none answers (`mail42 serve --detach`), says
+// The client connects (in the app group's container) when it is first asked, starts the daemon if none answers (`mail42 serve --detach`, run through `services.shell`), says
 // `hello` with its version (a daemon of another version steps aside or refuses, see the protocol), and reconnects by
 // itself, telling `changes()` listeners that something may have been missed.
 
@@ -13,15 +13,27 @@
 
 import Darwin
 import Foundation
+import Work42PluginKit
 
 nonisolated final class MailServeClient: MailTransport, @unchecked Sendable {
 
     /// The mail42 version this widget was built with (`work42-plugin/plugin.yaml`); a test keeps the two equal.
-    static let version = "0.3.2"
+    static let version = "0.4.0"
+
+    /// The app group `mail42 serve` listens in. The widget runs in a sandboxed extension, which may connect to a socket only in
+    /// a group container it declares (`app_groups` in plugin.yaml), never in a home folder it declares; mail42.app is signed
+    /// with the same group so macOS doesn't ask about "data from other apps".
+    static let groupIdentifier = "74RFQFPVQ9.com.work42.mail42"
+
+    /// `~/Library/Group Containers/74RFQFPVQ9.com.work42.mail42`: where `serve.sock` lives.
+    static var groupDirectory: URL {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupIdentifier)
+            ?? RealHome.url.appendingPathComponent("Library/Group Containers/\(groupIdentifier)", isDirectory: true)
+    }
 
     private let version: String
     private let directory: URL
-    private let executable: @Sendable () -> URL?
+    private let startDaemon: @Sendable () async throws -> Void
     private let startupWait: Duration
 
     private let lock = NSLock()
@@ -32,18 +44,19 @@ nonisolated final class MailServeClient: MailTransport, @unchecked Sendable {
     private var closed = false
 
     /// - Parameters:
-    ///   - directory: where `serve.sock` lives (`~/.work42/mail42`).
-    ///   - executable: the `mail42` that can start the daemon (`~/.work42/bin/mail42`); nil when it isn't installed.
+    ///   - directory: where `serve.sock` lives (the app group's container).
+    ///   - startDaemon: starts `mail42 serve --detach` (the model runs it through `services.shell`) and returns once it has
+    ///     forked into the background; throws `MailFailure.notInstalled` when there is no `mail42` to start.
     ///   - startupWait: how long to wait for a daemon we started to listen.
     init(
         version: String = MailServeClient.version,
-        directory: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".work42/mail42", isDirectory: true),
-        executable: @escaping @Sendable () -> URL? = { MailCLI.executableURL() },
+        directory: URL = MailServeClient.groupDirectory,
+        startDaemon: @escaping @Sendable () async throws -> Void = { throw MailFailure.notInstalled },
         startupWait: Duration = .seconds(2)
     ) {
         self.version = version
         self.directory = directory
-        self.executable = executable
+        self.startDaemon = startDaemon
         self.startupWait = startupWait
     }
 
@@ -126,8 +139,7 @@ nonisolated final class MailServeClient: MailTransport, @unchecked Sendable {
         for round in 0..<2 {
             var fd = Self.openSocket(path: socketPath)
             if fd == nil {
-                guard let mail42 = executable() else { throw MailFailure.notInstalled }
-                if !startedDaemon { try await Self.startDaemon(mail42); startedDaemon = true }
+                if !startedDaemon { try await startDaemon(); startedDaemon = true }
                 fd = try await waitForSocket()
             }
             guard let fd else {
@@ -200,22 +212,20 @@ nonisolated final class MailServeClient: MailTransport, @unchecked Sendable {
         return fd
     }
 
-    /// `mail42 serve --detach`: starts the daemon in the background and returns at once. Waits for that with a
-    /// termination callback, never with `waitUntilExit`.
-    private static func startDaemon(_ executable: URL) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let process = Process()
-            process.executableURL = executable
-            process.arguments = ["serve", "--detach"]
-            process.standardInput = FileHandle.nullDevice
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            process.terminationHandler = { _ in continuation.resume() }
+    /// Starts `mail42 serve --detach` through `shell`: the daemon forks into the background and the command returns at once, so
+    /// the daemon outlives the shell call (and the widget). 127 is the shell's "command not found".
+    static func startDaemonCommand(shell: any WidgetShellService) -> @Sendable () async throws -> Void {
+        {
+            let result: WidgetShellResult
             do {
-                try process.run()
+                result = try await shell.run(command: "mail42 serve --detach", timeout: .seconds(15))
             } catch {
-                process.terminationHandler = nil
-                continuation.resume(throwing: MailFailure.notInstalled)
+                throw MailFailure(code: "service_unavailable", message: "The mail42 service didn\u{2019}t start.")
+            }
+            if result.exitCode == 127 { throw MailFailure.notInstalled }
+            guard result.exitCode == 0 else {
+                let said = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                throw MailFailure(code: "service_unavailable", message: said.isEmpty ? "The mail42 service didn\u{2019}t start." : said)
             }
         }
     }

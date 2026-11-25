@@ -133,7 +133,7 @@ nonisolated final class Events: @unchecked Sendable {
 struct MailServeClientTests {
 
     private func client(_ daemon: FakeDaemon, version: String = "0.3.0") -> MailServeClient {
-        MailServeClient(version: version, directory: daemon.directory, executable: { nil }, startupWait: .milliseconds(200))
+        MailServeClient(version: version, directory: daemon.directory, startDaemon: { throw MailFailure.notInstalled }, startupWait: .milliseconds(200))
     }
 
     @Test("the widget's mail42 version is the plugin's")
@@ -243,7 +243,7 @@ struct MailServeClientTests {
         let directory = URL(fileURLWithPath: "/tmp/m42s-\(UUID().uuidString.prefix(8).lowercased())", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let client = MailServeClient(version: "0.3.0", directory: directory, executable: { nil }, startupWait: .milliseconds(100))
+        let client = MailServeClient(version: "0.3.0", directory: directory, startDaemon: { throw MailFailure.notInstalled }, startupWait: .milliseconds(100))
         await #expect(throws: MailFailure.self) { try await client.run(["x"]) }
     }
 
@@ -253,6 +253,70 @@ struct MailServeClientTests {
         #expect(MailServeClient.isNewer("0.10.0", than: "0.9.0"))
         #expect(!MailServeClient.isNewer("0.3.0", than: "0.3.0"))
         #expect(!MailServeClient.isNewer("0.2.9", than: "0.3.0"))
+    }
+}
+
+// MARK: - The app group and starting the daemon (WOR-889)
+
+import Work42PluginKit
+
+private struct ScriptedShell: WidgetShellService {
+    let result: WidgetShellResult?
+    let ran: Ran
+    final class Ran: @unchecked Sendable {
+        private let lock = NSLock()
+        private var seen: [(String, Duration?)] = []
+        var commands: [(String, Duration?)] { lock.withLock { seen } }
+        func add(_ command: String, _ timeout: Duration?) { lock.withLock { seen.append((command, timeout)) } }
+    }
+    func run(command: String) async throws -> WidgetShellResult { try await run(command: command, timeout: .seconds(10)) }
+    func run(command: String, timeout: Duration) async throws -> WidgetShellResult {
+        ran.add(command, timeout)
+        guard let result else { throw WidgetServiceError(message: "timed out") }
+        return result
+    }
+}
+
+@Suite("MailServeClient: app group and daemon start")
+struct MailServeClientGroupTests {
+
+    @Test("the socket is looked for in the app group's container, not in a home folder")
+    func groupDirectory() {
+        #expect(MailServeClient.groupIdentifier == "74RFQFPVQ9.com.work42.mail42")
+        #expect(MailServeClient.groupDirectory.lastPathComponent == "74RFQFPVQ9.com.work42.mail42")
+        #expect(MailServeClient.groupDirectory.path.contains("/Library/Group Containers/"))
+        #expect(!MailServeClient.groupDirectory.path.contains("/.work42/"))
+    }
+
+    @Test("starting the daemon runs `mail42 serve --detach` through the shell with a timeout")
+    func startsThroughTheShell() async throws {
+        let ran = ScriptedShell.Ran()
+        let start = MailServeClient.startDaemonCommand(
+            shell: ScriptedShell(result: WidgetShellResult(stdout: "", stderr: "", exitCode: 0), ran: ran))
+        try await start()
+        #expect(ran.commands.map(\.0) == ["mail42 serve --detach"])
+        #expect(ran.commands.first?.1 == .seconds(15))
+    }
+
+    @Test("a shell that cannot find mail42 (127) means it is not installed")
+    func notInstalled() async {
+        let start = MailServeClient.startDaemonCommand(
+            shell: ScriptedShell(result: WidgetShellResult(stdout: "", stderr: "mail42: command not found", exitCode: 127), ran: .init()))
+        await #expect(throws: MailFailure.self) { try await start() }
+        do { try await start() } catch let failure as MailFailure { #expect(failure.code == MailFailure.notInstalled.code) } catch {}
+    }
+
+    @Test("any other failure is service_unavailable and carries what mail42 said; a timeout is service_unavailable too")
+    func otherFailures() async {
+        let failing = MailServeClient.startDaemonCommand(
+            shell: ScriptedShell(result: WidgetShellResult(stdout: "", stderr: "can't listen\n", exitCode: 1), ran: .init()))
+        do { try await failing() } catch let failure as MailFailure {
+            #expect(failure.code == "service_unavailable" && failure.message == "can't listen")
+        } catch { Issue.record("unexpected \(error)") }
+        let timedOut = MailServeClient.startDaemonCommand(shell: ScriptedShell(result: nil, ran: .init()))
+        do { try await timedOut() } catch let failure as MailFailure { #expect(failure.code == "service_unavailable") } catch {
+            Issue.record("unexpected \(error)")
+        }
     }
 }
 

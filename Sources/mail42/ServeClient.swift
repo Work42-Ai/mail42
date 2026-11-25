@@ -30,8 +30,13 @@ enum ServeClient {
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> VerbResult? {
         guard shouldForward(command: command, environment: environment) else { return nil }
-        let path = ServeDaemon.directory(environment: environment).appendingPathComponent("serve.sock").path
-        guard let fd = ServeSocket.connect(path: path, timeoutMs: 200) else { return nil }
+        // The daemon's folder, then (unless a run named its own with `MAIL42_SERVE_DIR`) the one before 0.4.0 used, for an old
+        // daemon that is still running.
+        var folders = [ServeDaemon.directory(environment: environment)]
+        if (environment["MAIL42_SERVE_DIR"] ?? "").isEmpty { folders.append(ServeDaemon.legacyDirectory) }
+        guard let fd = folders.lazy.compactMap({
+            ServeSocket.connect(path: $0.appendingPathComponent("serve.sock").path, timeoutMs: 200)
+        }).first else { return nil }
         defer { close(fd) }
 
         var buffer = Data()
