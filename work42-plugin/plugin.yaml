@@ -17,5 +17,8 @@ file_access:
     mode: read-write
 app_groups:
   - 74RFQFPVQ9.com.work42.mail42
+permissions:
+  - name: run-commands
+    reason: Runs the mail42 command-line tool that reads Apple Mail and starts its background service, until mail42 no longer needs it.
 requires: []
 global_skills: mail42-setup, mail42-cli
