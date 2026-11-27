@@ -39,10 +39,17 @@ nonisolated struct MailBodyTextBatch: Sendable {
     var texts: [Int64: String]
     /// Set when it stopped because the time limit passed. Messages it did not get to are then not counted as read.
     var ranOutOfTime = false
+    /// Messages whose text was only partly read (a file bigger than the source reads from the start).
+    var partial: Set<Int64> = []
+    /// Set when a read failed for a reason other than "no file" (a refusal by macOS or the bridge): the search ends with it
+    /// instead of answering from the messages that did read.
+    var failure: (any Error)?
 
-    init(texts: [Int64: String], ranOutOfTime: Bool = false) {
+    init(texts: [Int64: String], ranOutOfTime: Bool = false, partial: Set<Int64> = [], failure: (any Error)? = nil) {
         self.texts = texts
         self.ranOutOfTime = ranOutOfTime
+        self.partial = partial
+        self.failure = failure
     }
 }
 
@@ -148,6 +155,7 @@ nonisolated extension MailIndex {
         let chunkSize = max(scan.chunkSize, 1)
         var matches: [String: Set<Int64>] = [:]
         var scanned = Set<Int64>()
+        var partlyRead = Set<Int64>()
         var records = headerRecords
         var satisfied = false, outOfTime = false
         var start = 0
@@ -157,9 +165,12 @@ nonisolated extension MailIndex {
             if remaining <= 0 { outOfTime = true; break }
             let batch = await textScanner.bodyTexts(
                 for: chunk.map { MailBodyCandidate(id: $0, mailboxURL: mailboxURLs[$0] ?? "") }, timeLimit: remaining)
+            // A refusal is not "no text": an answer built without those messages would be wrong, not partial.
+            if let failure = batch.failure { throw failure }
             // A message the source has no text for was read and contains no word, unless it ran out of time first.
             let read = batch.ranOutOfTime ? Set(chunk.filter { batch.texts[$0] != nil }) : Set(chunk)
             scanned.formUnion(read)
+            partlyRead.formUnion(batch.partial.intersection(read))
             for id in read {
                 guard let text = batch.texts[id] else { continue }
                 let folded = Self.fold(text)
@@ -190,6 +201,14 @@ nonisolated extension MailIndex {
         } else if moreExist {
             note = "Read the text of the newest \(candidates.count.formatted()) messages that match the rest of your "
                 + "query; older ones weren't searched. Add from:, in: or date: to reach further back."
+        }
+        // A message bigger than what is read of each file: its start was searched, and a word further in may be missed (or, under
+        // `not`, wrongly let the message through).
+        if !partlyRead.isEmpty {
+            let count = partlyRead.count
+            let partly = "The text of \(count.formatted()) large message\(count == 1 ? " was" : "s was") only partly searched "
+                + "(the start of each); a word later in \(count == 1 ? "it" : "them") may be missed."
+            note = [note, partly].compactMap { $0 }.joined(separator: " ")
         }
         return outcome(records, note: note)
     }
