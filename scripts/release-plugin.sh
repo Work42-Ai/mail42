@@ -77,7 +77,7 @@ has_notary_profile() { xcrun notarytool history --keychain-profile "$notary_prof
 has_cli() { [[ -x "$cli" ]]; }
 cli_version_pinned() {
   [[ -f .work42-version ]] || return 1
-  [[ "$("$cli" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)" == "$(tr -d '[:space:]' < .work42-version)" ]]
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null)" == "$(tr -d '[:space:]' < .work42-version)" ]]
 }
 clean_main() { [[ "$(git branch --show-current)" == main ]] && [[ -z "$(git status --porcelain)" ]]; }
 synced_with_origin() { git fetch --quiet origin main && [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]]; }
@@ -90,7 +90,7 @@ readiness_report() {
   check "Developer ID Application identity in the login keychain" has_identity
   if [[ "$notarize" == true ]]; then check "notarytool profile '$notary_profile'" has_notary_profile; fi
   check "Work42 CLI at $cli" has_cli
-  check ".work42-version matches the CLI's version" cli_version_pinned
+  check ".work42-version matches the app's version (Info.plist; the CLI's own --version is a fixed dev string)" cli_version_pinned
   if [[ "$publish" == true || "$check_only" == true ]]; then
     check "clean checkout of main" clean_main
     check "main is up to date with origin" synced_with_origin
