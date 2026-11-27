@@ -163,7 +163,20 @@ final class MailModel {
         #if os(macOS)
         // The daemon is started through the Work42 shell, which finds `mail42` on its own PATH.
         guard let services else { return MailServeClient() }
-        return MailServeClient(startDaemon: MailServeClient.startDaemonCommand(shell: services.shell))
+        let shell = services.shell
+        let fallback: @Sendable () -> any MailTransport = { MailServeClient(startDaemon: MailServeClient.startDaemonCommand(shell: shell)) }
+        // Mail is read in this process through Work42's Full Disk Access and Automation services (no CLI, no daemon). A Work42
+        // that has neither (older than SDK 3.5.0) is the one case that goes to the daemon instead (see MailFallbackTransport).
+        guard let folder = directFolder() else { return fallback() }
+        var configuration = MailCtl.Configuration()
+        // The reader's pages (`message read --out`) are written under mail42's own folder in the real home (plugin.yaml file_access).
+        configuration.outputRoots = [RealHome.url.appendingPathComponent(".work42/mail42/reader", isDirectory: true)]
+        configuration.saveFolders = MailCtl.SaveFolders(
+            roots: [attachmentsFolder],
+            children: [.init(parent: FileManager.default.temporaryDirectory, prefix: quickLookFolderPrefix)])
+        let direct = MailCtlDirectTransport(
+            disk: services.diskRead, automation: services.automation, directory: folder, configuration: configuration)
+        return MailFallbackTransport(primary: direct, fallback: fallback)
         #else
         guard let services else { return MailUnavailableTransport() }
         let shell = services.shell
@@ -172,6 +185,28 @@ final class MailModel {
         return MailShellTransport(shell: shell, changeStream: { await MainActor.run { services.stream("changes", widget: "widget:mail") } })
         #endif
     }
+
+    #if os(macOS)
+    /// The extension's own writable folder (`Application Support/Mail42` in its container): the mirror of Mail's index lives in it.
+    private static func directFolder() -> URL? {
+        guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        let folder = support.appendingPathComponent("Mail42", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        } catch {
+            return nil
+        }
+        return folder
+    }
+
+    /// Where Save Attachment puts a file: mail42's own folder in the real home, the one place a sandboxed extension may write
+    /// (`file_access` in plugin.yaml). The person's `~/Downloads` is not allowed there (Work42's manifest rules refuse it), so the
+    /// file is revealed in Finder after it is saved.
+    private static var attachmentsFolder: URL { RealHome.url.appendingPathComponent(".work42/mail42/attachments", isDirectory: true) }
+
+    /// The temp folder Quick Look copies an attachment to is `<prefix><message id>`.
+    private static let quickLookFolderPrefix = "mail42-quicklook-"
+    #endif
 
     /// Messages already written for the reader, oldest first (a small LRU: files and web views are disposable).
     private var readerCache: [Int64: ReaderEntry] = [:]
@@ -660,6 +695,12 @@ final class MailModel {
     func openSelectedInMail() async { await perform(.openInMail) }
 
     func openFullDiskAccessSettings() async {
+        #if os(macOS)
+        // The in-process route cannot open System Settings; Work42 can: its permission broker shows its pill and opens the pane.
+        // A Work42 older than SDK 3.5.0 (the daemon route) throws here, and the old `permissions open` verb does it instead.
+        if let permissions = services?.permissions,
+           (try? await permissions.request(id: PluginPermissionID.fullDiskAccess)) != nil { return }
+        #endif
         _ = try? await mailStore.run(["permissions", "open"], priority: .opened, timeout: .seconds(20))
     }
 
@@ -687,7 +728,7 @@ final class MailModel {
     /// Previews an attachment with macOS Quick Look: it is copied to a temporary folder and `qlmanage` shows it.
     func quickLook(_ attachment: MailAttachment) async {
         guard let id = expandedID ?? selectedID else { return }
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("mail42-quicklook-\(id)", isDirectory: true)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("\(Self.quickLookFolderPrefix)\(id)", isDirectory: true)
         do {
             nonisolated struct Saved: Decodable, Sendable { let path: String }
             let saved = try await mailStore.json(
@@ -702,12 +743,12 @@ final class MailModel {
 
     func saveAttachment(_ attachment: MailAttachment) async {
         guard let id = expandedID ?? selectedID else { return }
-        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first?.path
-            ?? NSHomeDirectory() + "/Downloads"
+        let folder = Self.attachmentsFolder
         do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             nonisolated struct Saved: Decodable, Sendable { let path: String }
             let saved = try await mailStore.json(
-                Saved.self, ["attachment", "save", String(id), attachment.part, "--to", downloads], priority: .opened)
+                Saved.self, ["attachment", "save", String(id), attachment.part, "--to", folder.path], priority: .opened)
             services?.platform.reveal(URL(fileURLWithPath: saved.path))
             show("Saved \(URL(fileURLWithPath: saved.path).lastPathComponent)")
         } catch let failure as MailFailure {

@@ -2,12 +2,13 @@ manifest_version: 2
 name: mail42
 version: 0.4.0
 description: >
-  Read-only local email for you and your agents. Provides the Mail widget (a lightweight reader over every Apple
-  Mail account, with highlight-to-comment and a background sync) on top of the standalone `mail42` tool
-  (github.com/Work42-Ai/mail42), which holds the Full Disk Access grant and the local index. This plugin is UI and
-  orchestration: it only ever runs the `mail42` CLI, never reads Apple Mail itself, and never writes mail.
+  Local email for you and your agents. Provides the Mail widget (a lightweight reader over every Apple Mail account,
+  with highlight-to-comment and a background sync). On the Mac the widget reads Apple Mail's own index and message files
+  through Work42's Full Disk Access bridge and acts on mail (mark, flag, move, archive, delete, drafts) through Work42's
+  Automation permission for Mail, with no command-line tool in between. The iPad still reads mail through the Mac's
+  `mail42` command-line tool (github.com/Work42-Ai/mail42) for now, as does a Mac running a Work42 older than SDK 3.5.0.
 author: work42
-sdk_version: 3.3.0
+sdk_version: 3.5.0
 runtime: extension
 extension_bundle_id: com.work42.mail42.extension
 file_access:
@@ -18,7 +19,12 @@ file_access:
 app_groups:
   - 74RFQFPVQ9.com.work42.mail42
 permissions:
+  - name: full-disk-access
+    reason: Reads Apple Mail's mailbox index and message files.
+  - name: automation
+    target: com.apple.mail
+    reason: Marks, flags, moves, archives and drafts messages in Apple Mail.
   - name: run-commands
-    reason: Runs the mail42 command-line tool that reads Apple Mail and starts its background service, until mail42 no longer needs it.
+    reason: Runs the mail42 command-line tool for the iPad and for a Mac whose Work42 is older than SDK 3.5.0, until they no longer need it.
 requires: []
 global_skills: mail42-setup, mail42-cli

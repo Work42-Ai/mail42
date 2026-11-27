@@ -49,6 +49,55 @@ nonisolated enum MailCtl {
         var maxAttachmentBytes = 128 * 1024 * 1024
         /// Folders, besides the controller's own working folder, that `read(…, out:)` may write inside.
         var outputRoots: [URL] = []
+        /// Where `attachment save` (the direct transport's) may put a file. Nothing is saved anywhere else.
+        var saveFolders = SaveFolders()
+    }
+
+    /// The folders `attachment save --to <dir>` may write in: a folder and everything below it (`roots`, e.g. Downloads), and
+    /// folders made for one use, named `<prefix>…` directly inside a parent (`children`, e.g. the Quick Look folder in the temp
+    /// directory, whose parent is far too wide to be a root).
+    struct SaveFolders: Sendable {
+        struct Child: Sendable {
+            var parent: URL
+            var prefix: String
+            init(parent: URL, prefix: String) {
+                self.parent = parent
+                self.prefix = prefix
+            }
+        }
+        var roots: [URL] = []
+        var children: [Child] = []
+        init(roots: [URL] = [], children: [Child] = []) {
+            self.roots = roots
+            self.children = children
+        }
+    }
+
+    /// The code of a failure that means this host has no such service at all (an older Work42 than the SDK the plugin needs):
+    /// nothing was refused and nothing is wrong with Mail. A caller may take another route; no other failure says so.
+    static let hostUnsupportedCode = "host_unsupported"
+
+    /// The calls an older Work42 does not implement, as the extension's wire names them.
+    private static let hostServiceCalls: Set<String> = ["diskRead.stat", "diskRead.list", "diskRead.read", "automation.send"]
+
+    /// Whether a service error says the host has no such service: `WidgetServiceError.hostLacks(_:)` ("this host does not support
+    /// diskRead.stat(path:)", from the SDK's own defaults) or the wire error a host answers an extension's call it does not know
+    /// with (`WidgetServiceError.unsupported`: "diskRead.stat is not supported by this side (SDK 3.3.0); the caller is on SDK 3.5.0").
+    /// Only these words, and for the wire form only for the disk and automation calls: a refusal or an I/O error is never it.
+    static func lacksHost(_ text: String) -> Bool {
+        if text.hasPrefix("this host does not support ") { return true }
+        guard let call = text.range(of: " is not supported by this side (SDK "), text.contains("); the caller is on SDK ") else { return false }
+        return hostServiceCalls.contains(String(text[..<call.lowerBound]))
+    }
+
+    /// The words `MailAct` puts before an automation error's text in an `action_failed` message.
+    private static let actionFailedPrefix = "Mail couldn\u{2019}t do that: "
+
+    /// An action's failure, as `host_unsupported` when it only carries a host's "no automation service" answer.
+    static func normalizingHostLack(_ failure: MailFailure) -> MailFailure {
+        guard failure.code == "action_failed", failure.message.hasPrefix(actionFailedPrefix),
+              lacksHost(String(failure.message.dropFirst(actionFailedPrefix.count))) else { return failure }
+        return MailFailure(code: hostUnsupportedCode, message: failure.message)
     }
 
     /// What `message` should hand back as the body.
@@ -199,7 +248,9 @@ nonisolated enum MailCtl {
             case .permission(let text): return MailFailure(code: "fda_denied", message: text)
             case .noMailData:
                 return MailFailure(code: "no_mail_data", message: "No Apple Mail data found in ~/Library/Mail. Is Mail set up on this Mac?")
-            case .failed(let text): return MailFailure(code: "database_not_accessible", message: text)
+            case .failed(let text):
+                if lacksHost(text) { return MailFailure(code: hostUnsupportedCode, message: text) }
+                return MailFailure(code: "database_not_accessible", message: text)
             }
         }
         if let index = error as? MailIndexError {
@@ -745,7 +796,8 @@ nonisolated extension MailCtl {
         /// Runs an action, and after it succeeded makes the next read look at the mirror again (once: Mail may have changed its
         /// index already, and the cached copy must not be reused for the rest of the refresh interval).
         private func acted(_ run: () async throws -> MailActionResult) async throws -> MailActionResult {
-            let result = try await run()
+            let result: MailActionResult
+            do { result = try await run() } catch let failure as MailFailure { throw MailCtl.normalizingHostLack(failure) }
             invalidations += 1
             refreshedAt = nil
             return result
@@ -785,7 +837,9 @@ nonisolated extension MailCtl {
             try await acted { try await actions().draft(kind, of: id) }
         }
 
-        func open(_ id: Int64) async throws -> MailActionResult { try await actions().open(id) }
+        func open(_ id: Int64) async throws -> MailActionResult {
+            do { return try await actions().open(id) } catch let failure as MailFailure { throw MailCtl.normalizingHostLack(failure) }
+        }
 
         /// What Mail needs to address a message with: its account as Mail names it, the mailbox it is shown in (a Gmail message
         /// is stored in All Mail but shown under its Inbox label), its Message-ID and link, and the account's archive and junk

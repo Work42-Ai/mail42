@@ -317,6 +317,52 @@ struct MailControllerTests {
         #expect(MailCtl.failure(from: CancellationError()) is CancellationError)
     }
 
+    // MARK: A host without the services (the shapes an older Work42 answers with)
+
+    /// What the extension's proxies throw on a host with no such service: `ExtensionWire.swift`'s `WidgetServiceError.unsupported`.
+    private func notSupportedBySide(_ call: String) -> WidgetServiceError {
+        WidgetServiceError(
+            message: "\(call) is not supported by this side (SDK 3.3.0); the caller is on SDK 3.5.0",
+            suggestion: "update Work42 or rebuild the plugin so both use the same SDK major version")
+    }
+
+    @Test("every explicit 'capability unavailable' answer for a disk read is host_unsupported, through the real service error shapes")
+    func diskReadLackIsHostUnsupported() async throws {
+        func lacks(_ error: WidgetServiceError) async throws -> String? {
+            let world = try CtlWorld()
+            world.bridge.refuse = error
+            return await ctlFailure { try await world.controller.mailboxTree() }?.code
+        }
+        #expect(try await lacks(.hostLacks("diskRead.stat(path:)")) == MailCtl.hostUnsupportedCode)
+        for call in ["diskRead.stat", "diskRead.list", "diskRead.read"] {
+            #expect(try await lacks(notSupportedBySide(call)) == MailCtl.hostUnsupportedCode)
+        }
+        // A refusal, a missing file and a plain I/O error are not "unsupported".
+        #expect(try await lacks(.notPermitted("path outside the folders you allowed")) != MailCtl.hostUnsupportedCode)
+        #expect(try await lacks(WidgetServiceError(message: "could not read x: Operation not permitted (errno 1)")) == "fda_denied")
+        #expect(try await lacks(CtlBridge.missing("/x")) == "no_mail_data")
+        #expect(try await lacks(WidgetServiceError(message: "could not read x: Input/output error (errno 5)")) == "database_not_accessible")
+        // Words that merely mention the phrase somewhere else are not the wire error either.
+        #expect(try await lacks(WidgetServiceError(message: "could not read x: file is not supported by this side of the disk (errno 5)"))
+                == "database_not_accessible")
+    }
+
+    @Test("an action on a host with no automation service is host_unsupported in both shapes, and a denial or Mail's own error is not")
+    func automationLackIsHostUnsupported() async throws {
+        func code(_ error: any Error) async throws -> String? {
+            let world = try CtlWorld()
+            let controller = MailCtl.Controller(
+                disk: world.bridge, automation: FakeAutomation { _ in throw error }, directory: world.folder,
+                configuration: world.configuration())
+            return await ctlFailure { try await controller.mark(101, read: true) }?.code
+        }
+        #expect(try await code(WidgetServiceError.hostLacks("automation.send(_:)")) == MailCtl.hostUnsupportedCode)
+        #expect(try await code(notSupportedBySide("automation.send")) == MailCtl.hostUnsupportedCode)
+        #expect(try await code(WidgetServiceError.notPermitted("automation is not allowed")) == "automation_denied")
+        #expect(try await code(WidgetServiceError(message: "Mail got an error: Can\u{2019}t get message 101")) == "action_failed")
+        #expect(try await code(WidgetServiceError(message: "automation.send failed: it is not supported by this side of Mail")) == "action_failed")
+    }
+
     // MARK: Reading the index
 
     @Test("the mailbox tree names the account from the Accounts database and carries Apple's counters")

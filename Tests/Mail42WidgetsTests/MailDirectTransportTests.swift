@@ -191,15 +191,211 @@ struct MailDirectTransportTests {
         try expectFailure(gone, status: 2, code: "not_found")
     }
 
-    @Test("attachment list decodes into [MailAttachment]; attachment save is a typed failure the caller handles")
+    @Test("attachment list decodes into [MailAttachment]; attachment save writes nowhere unless a save folder was configured")
     func attachments() async throws {
         let world = try CtlWorld()
         let listed = try decode([MailAttachment].self, try await world.transport.run(["attachment", "list", "103", "--json"]))
         #expect(listed == [MailAttachment(part: "2", filename: "report.pdf", mime: "application/pdf", size: Int64(MailFixtures.attachmentBytes.count))])
         #expect(try decode([MailAttachment].self, try await world.transport.run(["attachment", "list", "101", "--json"])).isEmpty)
 
+        // The world's transport has no save folders: no folder at all is one it may write in.
         let save = try await world.transport.run(["attachment", "save", "103", "2", "--to", "~/Downloads", "--json"])
-        try expectFailure(save, status: 1, code: "unsupported_in_extension")
+        try expectFailure(save, status: 2, code: "path_not_allowed")
+    }
+
+    // MARK: Saving an attachment (the widget's Save Attachment and Quick Look)
+
+    /// A scratch folder tree: `allowed` (a save root), `outside` (next to it, in no root).
+    private final class Folders {
+        let base = URL(fileURLWithPath: "/tmp/w900-save-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        var allowed: URL { base.appendingPathComponent("allowed", isDirectory: true) }
+        var outside: URL { base.appendingPathComponent("outside", isDirectory: true) }
+        init() throws {
+            try FileManager.default.createDirectory(at: allowed, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        }
+        deinit { try? FileManager.default.removeItem(at: base) }
+        func contents(_ folder: URL) -> [String] { ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).sorted() }
+    }
+
+    private func saver(_ world: CtlWorld, _ folders: MailCtl.SaveFolders) -> MailCtlDirectTransport {
+        MailCtlDirectTransport(controller: world.controller, saveFolders: folders)
+    }
+
+    private func save(_ transport: MailCtlDirectTransport, to directory: String, part: String = "2") async throws -> MailCLIResult {
+        try await transport.run(["attachment", "save", "103", part, "--to", directory, "--json"])
+    }
+
+    @Test("attachment save writes the bytes under the attachment's own name in an allowed folder, and prints {path, bytes} as the CLI did")
+    func saveWritesTheFile() async throws {
+        let world = try CtlWorld()
+        let folders = try Folders()
+        let transport = saver(world, .init(roots: [folders.allowed]))
+        let target = folders.allowed.appendingPathComponent("sub", isDirectory: true)      // made, like the CLI did
+
+        let result = try await save(transport, to: target.path)
+        let printed = try object(result)
+        #expect(result.status == 0 && result.stderr.isEmpty)
+        #expect(printed["path"] as? String == target.appendingPathComponent("report.pdf").path)
+        #expect(printed["bytes"] as? Int == MailFixtures.attachmentBytes.count)
+        #expect(Set(printed.keys) == ["path", "bytes"])
+        #expect(try Data(contentsOf: target.appendingPathComponent("report.pdf")) == MailFixtures.attachmentBytes)
+    }
+
+    @Test("a second save of the same attachment gets a numbered name and never overwrites the first")
+    func saveCollisionIsNumbered() async throws {
+        let world = try CtlWorld()
+        let folders = try Folders()
+        let transport = saver(world, .init(roots: [folders.allowed]))
+        try Data("mine".utf8).write(to: folders.allowed.appendingPathComponent("report.pdf"))
+
+        let first = try object(try await save(transport, to: folders.allowed.path))
+        #expect(first["path"] as? String == folders.allowed.appendingPathComponent("report (1).pdf").path)
+        let second = try object(try await save(transport, to: folders.allowed.path))
+        #expect(second["path"] as? String == folders.allowed.appendingPathComponent("report (2).pdf").path)
+        #expect(try String(contentsOf: folders.allowed.appendingPathComponent("report.pdf"), encoding: .utf8) == "mine")
+        #expect(try Data(contentsOf: folders.allowed.appendingPathComponent("report (2).pdf")) == MailFixtures.attachmentBytes)
+        #expect(folders.contents(folders.allowed) == ["report (1).pdf", "report (2).pdf", "report.pdf"])
+    }
+
+    @Test("a folder outside the save folders, one with .. in it, or one that is a link out are refused, and nothing is written")
+    func saveRefusesWhatIsNotAllowed() async throws {
+        let world = try CtlWorld()
+        let folders = try Folders()
+        let transport = saver(world, .init(roots: [folders.allowed]))
+        let link = folders.allowed.appendingPathComponent("escape")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: folders.outside)
+        let hole = folders.allowed.appendingPathComponent("hole")
+        try FileManager.default.createSymbolicLink(at: hole, withDestinationURL: folders.base.appendingPathComponent("nowhere"))
+
+        let refused = [
+            folders.outside.path,                                                      // not in a root
+            folders.outside.appendingPathComponent("new").path,                        // below nothing allowed, not there yet
+            folders.allowed.path + "/../outside",                                      // goes up out of the root
+            folders.allowed.appendingPathComponent("a/../../outside").path,
+            link.path,                                                                 // a link to a folder outside
+            link.appendingPathComponent("deeper").path,                                // below that link
+            hole.path,                                                                 // a link to something that is not there
+            "relative/folder",
+            "/",
+        ]
+        for directory in refused {
+            let result = try await save(transport, to: directory)
+            try expectFailure(result, status: 2, code: "path_not_allowed")
+        }
+        #expect(folders.contents(folders.outside).isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: folders.base.appendingPathComponent("nowhere").path))
+        #expect(folders.contents(folders.allowed) == ["escape", "hole"])
+
+        // With no folder configured at all, nothing is allowed.
+        let none = saver(world, .init())
+        try expectFailure(try await save(none, to: folders.allowed.path), status: 2, code: "path_not_allowed")
+        #expect(folders.contents(folders.allowed) == ["escape", "hole"])
+    }
+
+    @Test("the Quick Look folder (mail42-quicklook-<id> directly in the temp folder) is accepted, other folders there are not")
+    func saveQuickLookFolder() async throws {
+        let world = try CtlWorld()
+        let folders = try Folders()
+        let temp = folders.base.appendingPathComponent("tmp", isDirectory: true)
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        let transport = saver(world, .init(children: [.init(parent: temp, prefix: "mail42-quicklook-")]))
+
+        let quickLook = temp.appendingPathComponent("mail42-quicklook-103", isDirectory: true)
+        let printed = try object(try await save(transport, to: quickLook.path))
+        #expect(printed["path"] as? String == quickLook.appendingPathComponent("report.pdf").path)
+        #expect(try Data(contentsOf: quickLook.appendingPathComponent("report.pdf")) == MailFixtures.attachmentBytes)
+
+        // Saving again into the same folder works too (the widget opens the same attachment twice).
+        let again = try object(try await save(transport, to: quickLook.path))
+        #expect(again["path"] as? String == quickLook.appendingPathComponent("report (1).pdf").path)
+
+        let link = temp.appendingPathComponent("mail42-quicklook-link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: folders.outside)
+        let refused = [
+            temp.path,                                                                  // the temp folder itself
+            temp.appendingPathComponent("other", isDirectory: true).path,               // anything else in it
+            temp.appendingPathComponent("mail42-quicklook-", isDirectory: true).path,   // the prefix alone
+            quickLook.appendingPathComponent("nested").path,                            // below a Quick Look folder
+            temp.path + "/x/../mail42-quicklook-9",                                     // .. in the way
+            link.path,                                                                  // a Quick Look name that is a link out
+            folders.outside.appendingPathComponent("mail42-quicklook-1").path,          // the name in another parent
+        ]
+        for directory in refused {
+            try expectFailure(try await save(transport, to: directory), status: 2, code: "path_not_allowed")
+        }
+        #expect(folders.contents(folders.outside).isEmpty)
+        #expect(folders.contents(temp) == ["mail42-quicklook-103", "mail42-quicklook-link"])
+    }
+
+    @Test("attachment save answers the controller's own failures (no such part, missing --to, bad id) and writes nothing")
+    func saveFailures() async throws {
+        let world = try CtlWorld()
+        let folders = try Folders()
+        let transport = saver(world, .init(roots: [folders.allowed]))
+        try expectFailure(try await save(transport, to: folders.allowed.path, part: "9"), status: 2, code: "not_found")
+        try expectFailure(try await transport.run(["attachment", "save", "103", "2", "--json"]), status: 2, code: "usage")
+        try expectFailure(try await transport.run(["attachment", "save", "103", "--to", folders.allowed.path, "--json"]), status: 2, code: "usage")
+        try expectFailure(try await transport.run(["attachment", "save", "abc", "2", "--to", folders.allowed.path, "--json"]), status: 2, code: "usage")
+        try expectFailure(try await transport.run(["attachment", "save", "9999", "2", "--to", folders.allowed.path, "--json"]), status: 2, code: "not_found")
+        #expect(folders.contents(folders.allowed).isEmpty)
+    }
+
+    @Test("a folder swapped for a link between the check and the open writes nothing outside the save folder")
+    func saveSurvivesAFolderSwappedForALink() async throws {
+        let world = try CtlWorld()
+        let folders = try Folders()
+        let sub = folders.allowed.appendingPathComponent("sub", isDirectory: true)
+        let moved = folders.allowed.appendingPathComponent("moved", isDirectory: true)
+        let outside = folders.outside
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        // After the folder was validated, another process renames it and puts a link to a folder outside the root in its place.
+        let transport = MailCtlDirectTransport(
+            controller: world.controller, saveFolders: .init(roots: [folders.allowed]),
+            beforeSaveOpen: { _ in
+                try? FileManager.default.moveItem(at: sub, to: moved)
+                try? FileManager.default.createSymbolicLink(at: sub, withDestinationURL: outside)
+            })
+
+        let result = try await save(transport, to: sub.path)
+        try expectFailure(result, status: 2, code: "path_not_allowed")
+        #expect(folders.contents(folders.outside).isEmpty)
+        #expect(folders.contents(moved).isEmpty)
+    }
+
+    @Test("the same swap one level up, for a folder that is made by the save, writes nothing outside either")
+    func saveSurvivesAnAncestorSwappedForALink() async throws {
+        let world = try CtlWorld()
+        let folders = try Folders()
+        let parent = folders.allowed.appendingPathComponent("parent", isDirectory: true)
+        let moved = folders.allowed.appendingPathComponent("moved", isDirectory: true)
+        let outside = folders.outside
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let transport = MailCtlDirectTransport(
+            controller: world.controller, saveFolders: .init(roots: [folders.allowed]),
+            beforeSaveOpen: { _ in
+                try? FileManager.default.moveItem(at: parent, to: moved)
+                try? FileManager.default.createSymbolicLink(at: parent, withDestinationURL: outside)
+            })
+
+        let result = try await save(transport, to: parent.appendingPathComponent("new/deeper").path)
+        try expectFailure(result, status: 2, code: "path_not_allowed")
+        #expect(folders.contents(folders.outside).isEmpty)
+        #expect(folders.contents(moved).isEmpty)
+    }
+
+    // MARK: A host without the services
+
+    @Test("a host that lacks the disk bridge answers host_unsupported (not a permission, not no mail data) on every verb")
+    func hostLacksDisk() async throws {
+        let world = try CtlWorld()
+        world.bridge.refuse = WidgetServiceError.hostLacks("diskRead.stat(path:)")
+        for arguments in [["mailbox", "list"], ["envelope", "list", "-m", "all"], ["message", "read", "101", "--html"], ["attachment", "list", "103"]] {
+            try expectFailure(try await world.transport.run(arguments + ["--json"]), status: 1, code: MailCtl.hostUnsupportedCode)
+        }
+        // `permissions` has no envelope of its own: it throws, with the same code.
+        let thrown = await #expect(throws: MailFailure.self) { _ = try await world.transport.run(["permissions", "--json"]) }
+        #expect(thrown?.code == MailCtl.hostUnsupportedCode)
     }
 
     // MARK: Acting
