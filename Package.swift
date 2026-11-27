@@ -121,7 +121,8 @@ if hasSDK {
     ))
     targets.append(.testTarget(
         name: "Mail42WidgetsTests",
-        dependencies: ["Mail42Widgets", .target(name: "Mail42MailWidget")] + sdkDependencies,
+        // Mail42TestSupport builds synthetic Envelope Index databases, so the reader is tested against Apple's real column names.
+        dependencies: ["Mail42Widgets", .target(name: "Mail42MailWidget"), "Mail42TestSupport"] + sdkDependencies,
         path: "Tests/Mail42WidgetsTests",
         swiftSettings: widgetSettings
     ))
