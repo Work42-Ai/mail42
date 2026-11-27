@@ -53,6 +53,7 @@ nonisolated struct MailSQLRow {
 /// A read-only SQLite connection (`SQLITE_OPEN_READONLY`, never `immutable=1`, which would ignore the `-wal`).
 nonisolated final class MailSQLite: @unchecked Sendable {
     private var db: OpaquePointer?
+    private let lock = NSRecursiveLock()
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     init(path: String) throws {
@@ -69,13 +70,20 @@ nonisolated final class MailSQLite: @unchecked Sendable {
     deinit { close() }
 
     func close() {
+        lock.lock()
+        defer { lock.unlock() }
         if let db { sqlite3_close_v2(db) }
         db = nil
     }
 
+    /// Callers hold `lock`.
     private var lastError: String { db.map { String(cString: sqlite3_errmsg($0)) } ?? "database closed" }
 
     func query(_ sql: String, _ params: [MailSQLValue] = [], _ onRow: (MailSQLRow) throws -> Void) throws {
+        // `FULLMUTEX` guards SQLite, not the `db` property: the connection is used and closed under one lock. Recursive,
+        // because a row callback may run another query.
+        lock.lock()
+        defer { lock.unlock() }
         guard let db else { throw MailIndexError.database("database closed") }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
@@ -209,12 +217,12 @@ nonisolated final class MailIndex: @unchecked Sendable {
     /// Mailboxes with at most this many messages are listed by sorting their members; bigger ones by walking the date index.
     static let smallMailbox: Int64 = 20_000
 
-    private let db: MailSQLite
+    let db: MailSQLite
     private let accounts: [String: MailIndexAccountInfo]
-    private let hasSummary: Bool
+    let hasSummary: Bool
     private let hasDateSent: Bool
     private let hasMessageIDHeader: Bool
-    private let hasLabels: Bool
+    let hasLabels: Bool
     private(set) var mailboxRows: [MailIndexMailbox]
     private var mailboxByID: [Int64: MailIndexMailbox]
 
@@ -367,6 +375,7 @@ nonisolated final class MailIndex: @unchecked Sendable {
 
         var newest: [Record] = []
         var seen = Set<Int64>()
+        var shownBefore = Set<Int64>()
         var from = options.beforeID
         let batch = max(wanted * 3, 60)
         while newest.count < wanted {
@@ -374,35 +383,21 @@ nonisolated final class MailIndex: @unchecked Sendable {
             page.limit = batch
             page.beforeID = from
             let records = try listRecords(page)
+            var fresh: [Record] = []
             for record in records {
                 let key = record.conversationID == 0 ? -record.id : record.conversationID
-                if seen.insert(key).inserted { newest.append(record) }
+                if seen.insert(key).inserted { fresh.append(record) }
             }
+            // Conversations already listed on an earlier page are dropped here, before they count toward the page size, so a
+            // run of messages from a shown conversation cannot use up the quota and leave the page empty.
+            if let cursor {
+                shownBefore.formUnion(try conversationsShown(among: fresh.map(\.conversationID), above: cursor, plan: plan))
+            }
+            newest += fresh.filter { !shownBefore.contains($0.conversationID) }
             guard records.count == batch, let last = records.last else { break }
             from = last.id
         }
-
-        // Conversations already listed on an earlier page: a message of theirs in the view lies above the cursor.
-        var shownBefore = Set<Int64>()
-        if let cursor {
-            let conversations = Set(newest.map(\.conversationID).filter { $0 != 0 })
-            if !conversations.isEmpty {
-                let list = conversations.map(String.init).joined(separator: ",")
-                let above = try orderedIDs(
-                    mailboxes: plan.mailboxes,
-                    clauses: plan.clauses + [
-                        "m.conversation_id IN (\(list))",
-                        "(m.date_received > ? OR (m.date_received = ? AND m.ROWID >= ?))",
-                    ],
-                    params: [.int(cursor.date), .int(cursor.date), .int(cursor.id)], order: "", newestFirstLimit: nil)
-                if !above.isEmpty {
-                    let marks = Array(repeating: "?", count: above.count).joined(separator: ",")
-                    try db.query("SELECT DISTINCT conversation_id FROM messages WHERE ROWID IN (\(marks))",
-                                 above.map(MailSQLValue.int)) { shownBefore.insert($0.int(0)) }
-                }
-            }
-        }
-        let candidates = newest.filter { !shownBefore.contains($0.conversationID) }.prefix(wanted)
+        let candidates = newest.prefix(wanted)
         guard !candidates.isEmpty else { return [] }
 
         let conversations = candidates.map(\.conversationID).filter { $0 != 0 }
@@ -433,6 +428,29 @@ nonisolated final class MailIndex: @unchecked Sendable {
             let own = [Self.personName(name: record.fromName, address: record.fromAddr)]
             return Self.envelope(record, conversationCount: id == 0 ? 1 : (counts[id] ?? 1), participants: id == 0 ? own : (people[id] ?? own))
         }
+    }
+
+    /// Which of `ids` have a message of theirs in the view at or above the paging cursor (so an earlier page already showed them).
+    private func conversationsShown(
+        among ids: [Int64], above cursor: (id: Int64, date: Int64), plan: (mailboxes: [Int64]?, clauses: [String])
+    ) throws -> Set<Int64> {
+        var shown = Set<Int64>()
+        let conversations = Set(ids.filter { $0 != 0 })
+        guard !conversations.isEmpty else { return shown }
+        let list = conversations.map(String.init).joined(separator: ",")
+        let above = try orderedIDs(
+            mailboxes: plan.mailboxes,
+            clauses: plan.clauses + [
+                "m.conversation_id IN (\(list))",
+                "(m.date_received > ? OR (m.date_received = ? AND m.ROWID >= ?))",
+            ],
+            params: [.int(cursor.date), .int(cursor.date), .int(cursor.id)], order: "", newestFirstLimit: nil)
+        if !above.isEmpty {
+            let marks = Array(repeating: "?", count: above.count).joined(separator: ",")
+            try db.query("SELECT DISTINCT conversation_id FROM messages WHERE ROWID IN (\(marks))",
+                         above.map(MailSQLValue.int)) { shown.insert($0.int(0)) }
+        }
+        return shown
     }
 
     private static func personName(name: String?, address: String?) -> String {
@@ -480,7 +498,7 @@ nonisolated final class MailIndex: @unchecked Sendable {
         var accountEmail: String?
     }
 
-    private static func envelope(_ record: Record, conversationCount: Int?, participants: [String]?) -> MailEnvelope {
+    static func envelope(_ record: Record, conversationCount: Int?, participants: [String]?) -> MailEnvelope {
         MailEnvelope(
             id: record.id, messageID: record.messageID, conversationID: record.conversationID == 0 ? nil : record.conversationID,
             account: accountRef(for: record), mailbox: MailMailboxRef(
@@ -515,7 +533,7 @@ nonisolated final class MailIndex: @unchecked Sendable {
 
     private static func encode(_ text: String) -> String { text.addingPercentEncoding(withAllowedCharacters: unreserved) ?? text }
 
-    private func fetchRecords(
+    func fetchRecords(
         mailboxes: [Int64]?, clauses: [String], params: [MailSQLValue], order: String, newestFirstLimit: Int? = nil
     ) throws -> [Record] {
         let ids = try orderedIDs(mailboxes: mailboxes, clauses: clauses, params: params, order: order, newestFirstLimit: newestFirstLimit)

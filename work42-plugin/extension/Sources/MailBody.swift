@@ -446,6 +446,9 @@ nonisolated enum MailBodySanitizer {
         }
         // The CSP is a second wall behind the sanitiser: no script of any kind can run (default-src 'none' covers script-src),
         // while remote images, inline styles and fonts still load as they do in Mail.
+        // Remote content (`img-src *`, `style-src *`, `@import`, CSS `url()`, remote `<img>`) is allowed DELIBERATELY, mirroring
+        // the original CLI, whose tests require remote images to survive. That also lets a sender see that a message was opened
+        // (tracking pixels); blocking remote loads is a product decision, not something to tighten here.
         return "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">"
             + "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src * data: blob:; "
             + "style-src 'unsafe-inline' *; font-src * data:; media-src *; form-action 'none'\">"
@@ -574,7 +577,7 @@ nonisolated enum MailBodySanitizer {
                 continue
             }
             if urlAttributes.contains(name) {
-                if isDangerousURL(value) { continue }
+                if isDangerousURL(value, allowRasterDataImage: tag.name == "img" && name == "src") { continue }
                 if cidAttributes.contains(name), let inlined = dataURI(forCID: value, cids: cids) { value = inlined }
             } else if name == "style" {
                 value = inlineCIDInCSS(value, cids: cids)
@@ -586,15 +589,27 @@ nonisolated enum MailBodySanitizer {
 
     /// True for URLs that can run script or load an active document. Decodes entities and strips whitespace and control
     /// characters first, because browsers ignore those inside a scheme (`java&#x09;script:`).
-    static func isDangerousURL(_ raw: String) -> Bool {
-        let decoded = MailBodyEntities.decode(raw)
+    ///
+    /// - Parameter allowRasterDataImage: whether a `data:` URI of a raster image (png, jpeg, gif, webp) is acceptable: only in
+    ///   `<img src>`. Everywhere else (a link above all) `data:` is rejected whole; SVG is never accepted, it can hold script.
+    static func isDangerousURL(_ raw: String, allowRasterDataImage: Bool = true) -> Bool {
+        let decoded = MailBodyEntities.decodeAttribute(raw)
         let compact = String(String.UnicodeScalarView(decoded.unicodeScalars.filter { $0.value > 0x20 && $0.value != 0x7F }))
             .lowercased()
         if compact.hasPrefix("javascript:") || compact.hasPrefix("vbscript:") || compact.hasPrefix("livescript:") {
             return true
         }
-        if compact.hasPrefix("data:") { return !compact.hasPrefix("data:image/") }
+        if compact.hasPrefix("data:") {
+            guard allowRasterDataImage else { return true }
+            return !["png", "jpeg", "gif", "webp"].contains { compact.hasPrefix("data:image/\($0)") && isEndOfMIMEType(compact, after: "data:image/\($0)") }
+        }
         return false
+    }
+
+    /// `data:image/png;base64,…` / `data:image/png,…`: the type ends there, so `image/png+xml`-style suffixes don't pass.
+    private static func isEndOfMIMEType(_ compact: String, after prefix: String) -> Bool {
+        let rest = compact.dropFirst(prefix.count)
+        return rest.first == ";" || rest.first == ","
     }
 
     // MARK: cid: images
@@ -790,6 +805,59 @@ nonisolated enum MailBodyEntities {
             i = s.index(after: i)
         }
         return out
+    }
+
+    /// Named references browsers decode in an attribute even without the closing `;`.
+    private static let legacyNamed: Set<String> = ["amp", "lt", "gt", "quot", "nbsp", "copy", "reg"]
+
+    /// Character references as a browser decodes them in an attribute value (HTML5): numeric ones need no `;` and may have any
+    /// number of leading zeros; named ones need the `;`, except the legacy few, which stop at `=` or a letter/digit. Used to
+    /// see a URL the way the browser will, so `jav&#97script:` and `&#106avascript:` can't hide a scheme.
+    static func decodeAttribute(_ s: String) -> String {
+        guard s.contains("&") else { return s }
+        let scalars = Array(s.unicodeScalars)
+        var out = String.UnicodeScalarView()
+        var i = 0
+        func isAlnum(_ c: Unicode.Scalar) -> Bool { c.isASCII && (c.properties.isAlphabetic || ("0"..."9").contains(c)) }
+        while i < scalars.count {
+            guard scalars[i] == "&", i + 1 < scalars.count else { out.append(scalars[i]); i += 1; continue }
+            var j = i + 1
+            if scalars[j] == "#" {
+                j += 1
+                var radix: UInt32 = 10
+                if j < scalars.count, scalars[j] == "x" || scalars[j] == "X" { radix = 16; j += 1 }
+                var value: UInt32 = 0
+                var digits = 0
+                while j < scalars.count, let digit = Character(scalars[j]).hexDigitValue, UInt32(digit) < radix {
+                    value = min(value * radix + UInt32(digit), 0x110000)   // saturate: anything past U+10FFFF is the same
+                    digits += 1
+                    j += 1
+                }
+                guard digits > 0 else { out.append(scalars[i]); i += 1; continue }
+                if j < scalars.count, scalars[j] == ";" { j += 1 }
+                out.append(Unicode.Scalar(value).flatMap { $0.value == 0 ? nil : $0 } ?? "\u{FFFD}")
+                i = j
+                continue
+            }
+            var name = ""
+            while j < scalars.count, isAlnum(scalars[j]), name.count < 32 { name.unicodeScalars.append(scalars[j]); j += 1 }
+            if !name.isEmpty {
+                if j < scalars.count, scalars[j] == ";", let decoded = named[name.lowercased()] {
+                    out.append(contentsOf: decoded.unicodeScalars)
+                    i = j + 1
+                    continue
+                }
+                let next: Unicode.Scalar? = j < scalars.count ? scalars[j] : nil
+                if legacyNamed.contains(name.lowercased()), next != "=", next.map(isAlnum) != true, let decoded = named[name.lowercased()] {
+                    out.append(contentsOf: decoded.unicodeScalars)
+                    i = j
+                    continue
+                }
+            }
+            out.append(scalars[i])
+            i += 1
+        }
+        return String(out)
     }
 
     private static func decodeBody(_ body: Substring) -> String? {
@@ -1119,18 +1187,31 @@ nonisolated enum MailBodyMIME {
 
     /// The first `text/plain` and the first `text/html` of a body; everything else is discarded.
     static func parseBody(_ bodyData: Data, headers: [String: String]) -> (text: String?, html: String?) {
-        parsePart(
+        var budget = PartBudget()
+        return parsePart(
             bodyData,
             contentType: headers["content-type"] ?? "text/plain",
-            encoding: headers["content-transfer-encoding"] ?? "7bit")
+            encoding: headers["content-transfer-encoding"] ?? "7bit",
+            depth: 0,
+            budget: &budget)
     }
 
-    private static func parsePart(_ data: Data, contentType: String, encoding: String) -> (text: String?, html: String?) {
+    /// The most parts one message's body parse will look at: a hostile message can't make it do unbounded work.
+    static let maxBodyParts = 2_000
+
+    private struct PartBudget {
+        var parts = 0
+    }
+
+    private static func parsePart(
+        _ data: Data, contentType: String, encoding: String, depth: Int, budget: inout PartBudget
+    ) -> (text: String?, html: String?) {
         let (mimeType, params) = parseContentType(contentType)
 
         if mimeType.hasPrefix("multipart/") {
-            guard let boundary = params["boundary"] else { return (nil, nil) }
-            return parseMultipart(data, boundary: boundary)
+            // Too deep (the limit the attachment parser enforces): an opaque leaf, the rest of the message is still read.
+            guard depth < maxMultipartDepth, let boundary = params["boundary"] else { return (nil, nil) }
+            return parseMultipart(data, boundary: boundary, depth: depth, budget: &budget)
         }
 
         var decoded = decodeTransferEncoding(data, encoding: encoding)
@@ -1145,7 +1226,9 @@ nonisolated enum MailBodyMIME {
         return (nil, nil)
     }
 
-    private static func parseMultipart(_ data: Data, boundary: String) -> (text: String?, html: String?) {
+    private static func parseMultipart(
+        _ data: Data, boundary: String, depth: Int, budget: inout PartBudget
+    ) -> (text: String?, html: String?) {
         let boundaryMarker = "--\(boundary)"
 
         guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .ascii) else { return (nil, nil) }
@@ -1156,6 +1239,8 @@ nonisolated enum MailBodyMIME {
         for part in text.components(separatedBy: boundaryMarker) {
             let trimmed = part.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty || trimmed.hasPrefix("--") { continue }
+            budget.parts += 1
+            if budget.parts > maxBodyParts { break }
 
             // Each part has its own headers + body.
             let partData = Data(part.utf8)
@@ -1167,7 +1252,9 @@ nonisolated enum MailBodyMIME {
             let result = parsePart(
                 Data(partBody),
                 contentType: partHeaders["content-type"] ?? "text/plain",
-                encoding: partHeaders["content-transfer-encoding"] ?? "7bit")
+                encoding: partHeaders["content-transfer-encoding"] ?? "7bit",
+                depth: depth + 1,
+                budget: &budget)
 
             if let t = result.text, textBody == nil { textBody = t }
             if let h = result.html, htmlBody == nil { htmlBody = h }

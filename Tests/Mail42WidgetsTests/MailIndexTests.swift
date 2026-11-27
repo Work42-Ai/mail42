@@ -145,6 +145,53 @@ struct MailIndexTests {
         #expect(next.map(\.id) == [4], "the Plan conversation was shown above the cursor, so it is not repeated")
     }
 
+    @Test("a page of conversations skips ones already shown, however many of their messages lie below the cursor")
+    func conversationPagingPastAShownConversation() throws {
+        let builder = try EnvelopeIndexBuilder()
+        try builder.addMailbox(id: 1, url: url("INBOX"), total: 200)
+        // 1000: the cursor, newest message of conversation 7 (already shown). 1…70: more of conversation 7 below it, more than one
+        // scan batch (60). 100: conversation 9, the next thing to show.
+        try builder.inTransaction {
+            try builder.addMessage(message(1000, "Plan", at: 10_000, conversation: 7))
+            for id in 1...70 { try builder.addMessage(message(Int64(id), "Re: Plan", at: 1_000 + Int64(id), conversation: 7)) }
+            try builder.addMessage(message(100, "Other", at: 50, from: "cy@example.com", name: "Cy", conversation: 9))
+        }
+        let index = try open(builder)
+        #expect(try index.listConversations(.init(limit: 1)).map(\.id) == [1000])
+        let next = try index.listConversations(.init(beforeID: 1000, limit: 1))
+        #expect(next.map(\.id) == [100], "scanning goes on past the shown conversation until an unseen one turns up")
+        #expect(try index.listConversations(.init(beforeID: 100, limit: 1)).isEmpty)
+    }
+
+    @Test("many queries in flight while the connection is closed never crash; after the close they throw")
+    func closingWhileQuerying() async throws {
+        let builder = try EnvelopeIndexBuilder()
+        defer { builder.cleanup() }
+        try builder.addMailbox(id: 1, url: url("INBOX"), total: 1)
+        try builder.addMessage(message(1, "x", at: 100))
+        let db = try MailSQLite(path: builder.envelopeIndexURL.path)
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    for _ in 0..<300 {
+                        do { _ = try db.scalarInt("SELECT COUNT(*) FROM messages") } catch let error as MailIndexError {
+                            guard case .database = error else { Issue.record("unexpected \(error)"); return }
+                        } catch { Issue.record("unexpected \(error)"); return }
+                    }
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 2_000_000)
+                db.close()
+            }
+        }
+        db.close()
+        #expect(throws: MailIndexError.self) { _ = try db.scalarInt("SELECT COUNT(*) FROM messages") }
+        do { _ = try db.scalarInt("SELECT 1") } catch let error as MailIndexError {
+            guard case .database = error else { Issue.record("was \(error)"); return }
+        }
+    }
+
     @Test("a thread is the whole conversation, oldest first, and a message with no conversation is its own thread")
     func threads() throws {
         let builder = try EnvelopeIndexBuilder()

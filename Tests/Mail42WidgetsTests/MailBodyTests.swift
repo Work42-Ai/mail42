@@ -409,6 +409,32 @@ struct MailBodyParserTests {
         #expect(deep.attachments.isEmpty)
     }
 
+    @Test func aHostilelyNestedMessageIsReadWithoutRecursingToItsEnd() {
+        // 5,000 multiparts nested in one another, behind a top-level text part. Boundaries are not prefixes of each other.
+        var inner = crlf(["Content-Type: text/plain", "", "deepest"])
+        for level in stride(from: 5_000, to: 0, by: -1) {
+            inner = crlf(["Content-Type: multipart/mixed; boundary=\"b\(level)x\"", "", "--b\(level)x", inner, "--b\(level)x--"])
+        }
+        let message = crlf([
+            "From: a@example.com", "MIME-Version: 1.0", "Content-Type: multipart/mixed; boundary=\"topx\"", "",
+            "--topx", "Content-Type: text/plain", "", "top-level text",
+            "--topx", inner, "--topx--", "",
+        ])
+        let parsed = MailBodyParser.parse(rfc822: Data(message.utf8), isPartial: false)
+        #expect(parsed.text?.contains("top-level text") == true)
+        #expect(parsed.text?.contains("deepest") != true)
+    }
+
+    @Test func aMessageWithEndlessPartsIsCappedButKeepsWhatCameFirst() {
+        var lines = ["Content-Type: multipart/mixed; boundary=\"flatx\"", "",
+                     "--flatx", "Content-Type: text/plain", "", "first text"]
+        for _ in 0..<(MailBodyMIME.maxBodyParts + 500) { lines += ["--flatx", "Content-Type: application/x-none", "", "x"] }
+        lines += ["--flatx", "Content-Type: text/html", "", "<p>too late</p>", "--flatx--", ""]
+        let parsed = MailBodyParser.parse(rfc822: Data(crlf(lines).utf8), isPartial: false)
+        #expect(parsed.text?.contains("first text") == true)
+        #expect(parsed.html == nil, "the part budget ended the walk")
+    }
+
     @Test func plainTextFallsBackToTheHTMLAsText() throws {
         let htmlOnly = try parse(MailFixtures.htmlWithInlineImage())
         #expect(htmlOnly.text == nil)
@@ -591,6 +617,47 @@ struct MailBodySanitizerTests {
         let out = sanitize("<style>.a{color:red}</style><img src=\"data:image/png;base64,AAAA\">")
         #expect(out.contains("<style>.a{color:red}</style>"))
         #expect(out.contains("src=\"data:image/png;base64,AAAA\""))
+    }
+
+    @Test(arguments: [
+        #"<a href="jav&#97script:alert(1)">x</a>"#,              // numeric reference without the `;`
+        #"<a href="&#x6A;avascript:alert(1)">x</a>"#,
+        #"<a href="&#106avascript:alert(1)">x</a>"#,
+        #"<a href="&#0000000106;avascript:alert(1)">x</a>"#,     // leading zeros past any fixed window
+        #"<a href="javascript&colon;alert(1)">x</a>"#,
+        #"<a href="java&Tab;script:alert(1)">x</a>"#,
+        #"<a href="java&#9script:alert(1)">x</a>"#,              // an embedded tab, no `;`
+        #"<a href="java&#10script:alert(1)">x</a>"#,
+        #"<a href="&#x1;javascript:alert(1)">x</a>"#,            // a leading control character
+    ])
+    func decodesCharacterReferencesLikeABrowserBeforeTheSchemeCheck(_ hostile: String) {
+        let out = sanitize(hostile).lowercased()
+        #expect(!out.contains("href"), "kept: \(out)")
+    }
+
+    @Test func dataURIsSurviveOnlyInImageSources() {
+        let png = "data:image/png;base64,AAAA"
+        #expect(sanitize("<img src=\"\(png)\">").contains("src=\"\(png)\""))
+        for kind in ["jpeg", "gif", "webp"] {
+            #expect(sanitize("<img src=\"data:image/\(kind);base64,AAAA\">").contains("data:image/\(kind)"))
+        }
+        // Links and every other URL attribute: no data: at all.
+        for html in [
+            "<a href=\"\(png)\">x</a>", "<area href=\"\(png)\">", "<a href=\"&#100;ata:image/png;base64,AAAA\">x</a>",
+            "<a href=\"data:image/png,AAAA\">x</a>", "<link href=\"\(png)\">", "<video poster=\"\(png)\"></video>",
+            "<img longdesc=\"\(png)\">",
+        ] {
+            let out = sanitize(html)
+            #expect(!out.contains("data:"), "kept: \(out)")
+        }
+        // Never SVG (it can carry script), even as an image source.
+        for html in [
+            "<img src=\"data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=\">", "<img src=\"data:image/svg+xml,<svg/>\">",
+            "<img src=\"data:image/pngx;base64,AAAA\">", "<img src=\"data:text/html,<b>\">",
+        ] {
+            let out = sanitize(html)
+            #expect(!out.contains("data:"), "kept: \(out)")
+        }
     }
 
     @Test func keepsBareAttributesAndUnicodeText() {
