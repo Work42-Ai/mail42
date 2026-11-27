@@ -52,7 +52,16 @@ nonisolated struct MailQueryError: Error, Equatable {
 
 nonisolated enum MailQueryParser {
 
+    /// The longest query read, in characters, and the deepest nesting of `(` and `not` (each is a recursion of the parser, and of
+    /// the compiler after it): a hostile or runaway argument fails as a `bad_query` instead of exhausting the stack.
+    static let maxLength = 2_000
+    static let maxDepth = 64
+
     static func parse(_ input: String) throws -> MailQueryNode {
+        let length = input.count
+        guard length <= maxLength else {
+            throw MailQueryError.bad("the query is too long (\(length) characters; at most \(maxLength))", position: maxLength)
+        }
         var parser = Parser(tokens: try tokenize(input), inputLength: input.count)
         guard !parser.tokens.isEmpty else { throw MailQueryError.bad("the query is empty", position: 0) }
         let node = try parser.parseOr()
@@ -181,6 +190,8 @@ nonisolated enum MailQueryParser {
         let tokens: [Token]
         let inputLength: Int
         var index = 0
+        /// How many `(` and `not` are open around the term being read.
+        var depth = 0
 
         init(tokens: [Token], inputLength: Int) {
             self.tokens = tokens
@@ -224,8 +235,19 @@ nonisolated enum MailQueryParser {
             return left
         }
 
+        /// Opens one more level of nesting (a `(` or a `not`) at `token`, or fails when there are too many.
+        mutating func descend(at token: Token) throws {
+            depth += 1
+            guard depth <= MailQueryParser.maxDepth else {
+                throw MailQueryError.bad(
+                    "nested too deeply (more than \(MailQueryParser.maxDepth) levels of `(` or `not`)", position: token.position)
+            }
+        }
+
         mutating func parseNot() throws -> MailQueryNode {
             if let token = peek, token.kind == .not {
+                try descend(at: token)
+                defer { depth -= 1 }
                 advance()
                 guard peek != nil else {
                     throw MailQueryError.bad("expected a term after `not`", position: endPosition)
@@ -241,6 +263,8 @@ nonisolated enum MailQueryParser {
             }
             switch token.kind {
             case .lparen:
+                try descend(at: token)
+                defer { depth -= 1 }
                 advance()
                 guard peek != nil else {
                     throw MailQueryError.bad("missing `)` to close the `(`", position: token.position)

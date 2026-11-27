@@ -168,27 +168,20 @@ final class MailModel {
         // Mail is read in this process through Work42's Full Disk Access and Automation services (no CLI, no daemon). A Work42
         // that has neither (older than SDK 3.5.0) is the one case that goes to the daemon instead (see MailFallbackTransport).
         guard let folder = directFolder() else { return fallback() }
-        var configuration = MailCtl.Configuration()
-        // The reader's pages (`message read --out`) are written under mail42's own folder in the real home (plugin.yaml file_access).
-        configuration.outputRoots = [RealHome.url.appendingPathComponent(".work42/mail42/reader", isDirectory: true)]
-        configuration.saveFolders = MailCtl.SaveFolders(
-            roots: [attachmentsFolder],
-            children: [.init(parent: FileManager.default.temporaryDirectory, prefix: quickLookFolderPrefix)])
         let direct = MailCtlDirectTransport(
-            disk: services.diskRead, automation: services.automation, directory: folder, configuration: configuration)
+            disk: services.diskRead, automation: services.automation, directory: folder, configuration: directConfiguration())
         return MailFallbackTransport(primary: direct, fallback: fallback)
         #else
+        // The Mac runs the plugin's own `mail` tools for us (`services.pluginTools`), and the transport asks it for the counters
+        // every few seconds while the tile is on screen, less often while it does not answer.
         guard let services else { return MailUnavailableTransport() }
-        let shell = services.shell
-        // The Mac pushes `widget:mail/changes` (its Work42 listens to the mail42 service for us); a host that has no such stream
-        // finishes it at once, and the transport then falls back to asking for the counters.
-        return MailShellTransport(shell: shell, changeStream: { await MainActor.run { services.stream("changes", widget: "widget:mail") } })
+        return MailPluginToolsTransport(tools: services.pluginTools)
         #endif
     }
 
     #if os(macOS)
     /// The extension's own writable folder (`Application Support/Mail42` in its container): the mirror of Mail's index lives in it.
-    private static func directFolder() -> URL? {
+    static func directFolder() -> URL? {
         guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
         let folder = support.appendingPathComponent("Mail42", isDirectory: true)
         do {
@@ -202,10 +195,22 @@ final class MailModel {
     /// Where Save Attachment puts a file: mail42's own folder in the real home, the one place a sandboxed extension may write
     /// (`file_access` in plugin.yaml). The person's `~/Downloads` is not allowed there (Work42's manifest rules refuse it), so the
     /// file is revealed in Finder after it is saved.
-    private static var attachmentsFolder: URL { RealHome.url.appendingPathComponent(".work42/mail42/attachments", isDirectory: true) }
+    static var attachmentsFolder: URL { RealHome.url.appendingPathComponent(".work42/mail42/attachments", isDirectory: true) }
 
     /// The temp folder Quick Look copies an attachment to is `<prefix><message id>`.
     private static let quickLookFolderPrefix = "mail42-quicklook-"
+
+    /// What the direct controller is tuned with, for the tile and for the MCP tools (MailTools.swift): where the reader's pages may
+    /// be written and where an attachment may be saved.
+    static func directConfiguration() -> MailCtl.Configuration {
+        var configuration = MailCtl.Configuration()
+        // The reader's pages (`message read --out`) are written under mail42's own folder in the real home (plugin.yaml file_access).
+        configuration.outputRoots = [RealHome.url.appendingPathComponent(".work42/mail42/reader", isDirectory: true)]
+        configuration.saveFolders = MailCtl.SaveFolders(
+            roots: [attachmentsFolder],
+            children: [.init(parent: FileManager.default.temporaryDirectory, prefix: quickLookFolderPrefix)])
+        return configuration
+    }
     #endif
 
     /// Messages already written for the reader, oldest first (a small LRU: files and web views are disposable).
@@ -716,8 +721,8 @@ final class MailModel {
         do {
             nonisolated struct Saved: Decodable, Sendable { let path: String }
             let saved = try await mailStore.json(
-                Saved.self, ["attachment", "save", String(id), attachment.part, "--to", "~/Downloads"], priority: .opened)
-            show("Saved \(URL(fileURLWithPath: saved.path).lastPathComponent) to your Mac\u{2019}s Downloads")
+                Saved.self, ["attachment", "save", String(id), attachment.part, "--to", "~/.work42/mail42/attachments"], priority: .opened)
+            show("Saved \(URL(fileURLWithPath: saved.path).lastPathComponent) on your Mac (in the Mail plugin\u{2019}s attachments folder)")
         } catch let failure as MailFailure {
             show(failure.message)
         } catch {

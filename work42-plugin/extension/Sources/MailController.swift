@@ -239,6 +239,28 @@ nonisolated enum MailCtl {
 
     static func notFound(_ what: String) -> MailFailure { MailFailure(code: "not_found", message: "Not found: \(what).") }
 
+    /// The one mailbox of an account that `requested` names, for an action that must not guess (`move`): a numeric id is exact; then
+    /// the full name (path); then a name that is the last part of a path (`Reports` for `Clients/Reports`); then a role word
+    /// (`archive`, `trash`…), which counts only when no mailbox is literally named that. When a step finds several mailboxes it fails
+    /// with `ambiguous_mailbox`, listing each one's id and full name, rather than taking the first.
+    static func resolveMailbox(_ requested: String, in boxes: [MailIndexMailbox], account: String) throws -> MailIndexMailbox {
+        let wanted = requested.trimmingCharacters(in: .whitespaces).lowercased()
+        func only(_ matches: [MailIndexMailbox]) throws -> MailIndexMailbox? {
+            guard matches.count <= 1 else {
+                let candidates = matches.map { "\($0.id) \($0.name)" }.joined(separator: ", ")
+                throw MailFailure(
+                    code: "ambiguous_mailbox",
+                    message: "`\(requested)` matches more than one mailbox in the account \(account): \(candidates). Pass the id of the one you mean.")
+            }
+            return matches.first
+        }
+        if let number = Int64(wanted), let box = boxes.first(where: { $0.id == number }) { return box }
+        if let box = try only(boxes.filter { $0.name.lowercased() == wanted }) { return box }
+        if let box = try only(boxes.filter { $0.name.lowercased().hasSuffix("/" + wanted) }) { return box }
+        if let box = try only(boxes.filter { $0.role == wanted }) { return box }
+        throw notFound("a mailbox matching `\(requested)` in the account \(account)")
+    }
+
     /// Anything that can go wrong below, as the `MailFailure` the CLI would have printed. A `CancellationError` stays one.
     static func failure(from error: any Error) -> any Error {
         if error is CancellationError { return error }
@@ -811,19 +833,13 @@ nonisolated extension MailCtl {
 
         func unflag(_ id: Int64) async throws -> MailActionResult { try await acted { try await actions().unflag(id) } }
 
-        /// Moves to another mailbox of the message's account, named by id, full name, last name or role.
+        /// Moves to another mailbox of the message's account, named by id, full name, last name or role; a name that fits several
+        /// mailboxes is `ambiguous_mailbox` (see `MailCtl.resolveMailbox`).
         func move(_ id: Int64, to mailbox: String) async throws -> MailActionResult {
             let path: [String] = try await withIndex { index, _ -> [String] in
                 guard let envelope = try index.envelope(id: id) else { throw MailIndexError.notFound("message \(id)") }
                 let boxes = index.mailboxRows.filter { $0.accountID == envelope.account.id }
-                let wanted = mailbox.lowercased()
-                let found = Int64(mailbox).flatMap { number in boxes.first { $0.id == number } }
-                    ?? boxes.first { $0.name.lowercased() == wanted }
-                    ?? boxes.first { $0.name.lowercased().hasSuffix("/" + wanted) }
-                    ?? boxes.first { $0.role == wanted }
-                guard let found else {
-                    throw MailCtl.notFound("a mailbox matching `\(mailbox)` in the account \(envelope.account.name)")
-                }
+                let found = try MailCtl.resolveMailbox(mailbox, in: boxes, account: envelope.account.name)
                 return MailAct.path(ofMailboxNamed: found.name)
             }
             return try await acted { try await actions().move(id, toMailbox: path) }

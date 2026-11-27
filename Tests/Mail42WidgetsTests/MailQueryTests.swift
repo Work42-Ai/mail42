@@ -144,6 +144,47 @@ struct MailQueryParserTests {
         #expect(error.failure == MailFailure(code: "bad_query", message: "Bad query at position 3: unclosed quote"))
         #expect(MailQueryError.code == "bad_query")
     }
+
+    // MARK: Hostile input: bounded nesting and length
+
+    @Test("10,000 nested parentheses are a bad_query, not a stack overflow; under the length limit it is the depth limit that says so")
+    func deepParentheses() {
+        let query = String(repeating: "(", count: 10_000) + "a" + String(repeating: ")", count: 10_000)
+        #expect(failure(query) != nil)
+        let short = String(repeating: "(", count: 900) + "a" + String(repeating: ")", count: 900)
+        #expect(short.count <= MailQueryParser.maxLength)
+        let refused = failure(short)
+        #expect(refused?.message.contains("nested") == true)
+        #expect(refused?.position == MailQueryParser.maxDepth, "at the first `(` past the limit")
+    }
+
+    @Test("10,000 repeated `not` are a bad_query, not a stack overflow; under the length limit it is the depth limit that says so")
+    func deepNot() {
+        #expect(failure(String(repeating: "not ", count: 10_000) + "a") != nil)
+        let short = String(repeating: "not ", count: 400) + "a"
+        #expect(short.count <= MailQueryParser.maxLength)
+        #expect(failure(short)?.message.contains("nested") == true)
+    }
+
+    @Test("a 1 MB query is refused for its length before it is read, with the same bad_query error")
+    func hugeQuery() {
+        let refused = failure(String(repeating: "a ", count: 512 * 1024))
+        #expect(refused?.message.contains("long") == true)
+        #expect(refused?.position == MailQueryParser.maxLength)
+        #expect(throws: MailQueryError.self) { try MailQueryParser.parse(String(repeating: "x", count: MailQueryParser.maxLength + 1)) }
+        #expect(failure(String(repeating: "x", count: MailQueryParser.maxLength)) == nil)
+    }
+
+    @Test("a deep but legal query (depth 10, in parentheses and in `not`) still parses, and the limit itself is allowed")
+    func legalDepth() throws {
+        let parens = String(repeating: "(", count: 10) + "from:a or b" + String(repeating: ")", count: 10)
+        #expect(try parse(parens) == "or(from:a,b)")
+        #expect(try parse(String(repeating: "not ", count: 10) + "a") == "not(not(not(not(not(not(not(not(not(not(a))))))))))")
+        let edge = String(repeating: "(", count: MailQueryParser.maxDepth) + "a" + String(repeating: ")", count: MailQueryParser.maxDepth)
+        #expect(try parse(edge) == "a")
+        let over = String(repeating: "(", count: MailQueryParser.maxDepth + 1) + "a" + String(repeating: ")", count: MailQueryParser.maxDepth + 1)
+        #expect(failure(over)?.message.contains("nested") == true)
+    }
 }
 
 @Suite("Mail query compiler")

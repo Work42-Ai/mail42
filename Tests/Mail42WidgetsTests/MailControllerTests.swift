@@ -806,6 +806,57 @@ struct MailControllerTests {
         #expect(await ctlFailure { try await world.controller.move(103, to: "Nowhere") }?.code == "not_found")
     }
 
+    /// The world plus mailboxes that make names ambiguous: Clients/Reports (4), Personal/Reports (5), Clients/Archive (6),
+    /// Deleted Messages (7, role trash), Other/Clients/Reports (8).
+    private static func worldWithNestedMailboxes() throws -> CtlWorld {
+        let world = try CtlWorld()
+        for (id, path) in [(4, ["Clients", "Reports"]), (5, ["Personal", "Reports"]), (6, ["Clients", "Archive"]),
+                           (7, ["Deleted Messages"]), (8, ["Other", "Clients", "Reports"])] {
+            try world.builder.addMailbox(id: Int64(id), url: EnvelopeIndexBuilder.mailboxURL(path))
+        }
+        return world
+    }
+
+    private static func lastMoveTarget(_ world: CtlWorld) -> String {
+        world.automation.requests.last.map { String(describing: $0.parameters) } ?? ""
+    }
+
+    @Test("move: a name that is the suffix of several mailboxes is ambiguous_mailbox, naming each candidate's id and full name, and nothing is sent to Mail")
+    func moveAmbiguousSuffix() async throws {
+        let world = try Self.worldWithNestedMailboxes()
+        let failure = try #require(await ctlFailure { try await world.controller.move(103, to: "Reports") })
+        #expect(failure.code == "ambiguous_mailbox")
+        for fragment in ["4", "Clients/Reports", "5", "Personal/Reports", "8", "Other/Clients/Reports", "id"] {
+            #expect(failure.message.contains(fragment), "the message names \(fragment)")
+        }
+        #expect(world.automation.requests.isEmpty)
+        // The case does not matter, and two matches stay two.
+        #expect(await ctlFailure { try await world.controller.move(103, to: "reports") }?.code == "ambiguous_mailbox")
+    }
+
+    @Test("move: an exact full path wins over the mailboxes that only end with it, and a numeric id is exact")
+    func moveExactPathAndID() async throws {
+        let world = try Self.worldWithNestedMailboxes()
+        _ = try await world.controller.move(103, to: "Clients/Reports")
+        let exact = Self.lastMoveTarget(world)
+        #expect(exact.contains("Clients") && exact.contains("Reports") && !exact.contains("Other") && !exact.contains("Personal"))
+        _ = try await world.controller.move(103, to: "5")
+        #expect(Self.lastMoveTarget(world).contains("Personal"))
+        // "Archive" is a mailbox's whole name here: it is not ambiguous with Clients/Archive, which only ends with it.
+        _ = try await world.controller.move(103, to: "Archive")
+        let archive = Self.lastMoveTarget(world)
+        #expect(archive.contains("Archive") && !archive.contains("Clients"))
+    }
+
+    @Test("move: a role word is matched by role when no mailbox is literally named that, and an unknown name is not_found")
+    func moveRoleAndUnknown() async throws {
+        let world = try Self.worldWithNestedMailboxes()
+        _ = try await world.controller.move(103, to: "trash")
+        #expect(Self.lastMoveTarget(world).contains("Deleted Messages"))
+        #expect(await ctlFailure { try await world.controller.move(103, to: "Nowhere") }?.code == "not_found")
+        #expect(await ctlFailure { try await world.controller.move(103, to: "999") }?.code == "not_found")
+    }
+
     @Test("an action on a message the index no longer has is not_found and sends nothing to Mail")
     func actionOnAMissingMessage() async throws {
         let world = try CtlWorld()
