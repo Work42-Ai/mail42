@@ -144,9 +144,11 @@ extension ProcessWide {
                 Issue.record("the mail42 binary isn't built at \(Self.binary.path)")
                 return
             }
-            VerbRunner.version = "0.3.0"   // the binary reports its own; keep the comparison about everything else
             let mail = try EnvelopeIndexBuilder()
             defer { mail.cleanup() }
+            // The binary reports its own version; run in process with the same one, so the comparison is about everything else.
+            let reported = try binary(["version"], library: mail.library).out
+            VerbRunner.version = String(reported.dropFirst("mail42 v".count).dropLast())
             try seed(mail)
             let outFile = FileManager.default.temporaryDirectory.appendingPathComponent("mail42-runner-\(UUID().uuidString).html")
             defer { try? FileManager.default.removeItem(at: outFile) }

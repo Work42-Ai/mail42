@@ -1,0 +1,9 @@
+id: mail
+title: Mail
+description: Read your Apple Mail inbox, conversations and message text next to the chat, and act on a message.
+skills: [mail]
+mcps:
+  - id: mail
+    title: Mail
+    description: Search and read the user's Apple Mail (mailboxes, messages, threads, attachments, links), and, when asked, mark, move, archive, delete or junk a message or open a reply draft in Mail.
+    source: extension

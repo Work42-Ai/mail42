@@ -55,10 +55,24 @@ final class ServeDaemon: @unchecked Sendable {
         }
     }
 
-    /// `~/.work42/mail42`, or `$MAIL42_SERVE_DIR` (tests, and anyone running a second, separate daemon).
+    /// The app group the daemon and Work42's mail42 widget share. The widget is a sandboxed ExtensionKit extension: it can connect
+    /// to a socket in a group container it declares (`app_groups` in its plugin.yaml) and not to one in a home folder. mail42.app is
+    /// signed with this group (`scripts/build-mail42.sh`), so macOS doesn't ask about "data from other apps".
+    static let groupIdentifier = "74RFQFPVQ9.com.work42.mail42"
+
+    /// `~/Library/Group Containers/74RFQFPVQ9.com.work42.mail42`, or `$MAIL42_SERVE_DIR` (tests, and anyone running a second,
+    /// separate daemon). Built from the path rather than `containerURL(forSecurityApplicationGroupIdentifier:)`, which can create
+    /// the container (and make macOS ask) for a process that isn't signed with the group, such as a development build.
     static func directory(environment: [String: String]) -> URL {
         if let path = environment["MAIL42_SERVE_DIR"], !path.isEmpty { return URL(fileURLWithPath: path, isDirectory: true) }
-        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".work42/mail42", isDirectory: true)
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Group Containers/\(groupIdentifier)", isDirectory: true)
+    }
+
+    /// `~/.work42/mail42`: where a daemon before 0.4.0 listened. The command line still looks there, so it can use a daemon of
+    /// the old version that is still running; nothing listens there any more once that one exits.
+    static var legacyDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".work42/mail42", isDirectory: true)
     }
 
     let configuration: Configuration

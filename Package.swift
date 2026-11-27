@@ -10,11 +10,11 @@
 // mail42           the CLI executable (hand-parsed verbs, no ArgumentParser).
 
 //
-// The Mail widget (work42-plugin/widgets/mail/Sources) is ALSO built here, as the `Mail42Widgets` library the Work42
-// iPad app links (macOS 15, iOS 26). A plugin widget compiles on its own from its own Sources folder against the app's
-// SDK frameworks, so that folder stays the single source of the widget: it is one SwiftPM target (`Mail42MailWidget`)
-// built from the same files, with the dylib entry points compiled out (MAIL42_WIDGETS_LIBRARY), and
-// `Sources/Mail42Widgets` maps a widget id to its view.
+// The Mail widget (work42-plugin/extension/Sources) is ALSO built here, as the `Mail42Widgets` library the Work42
+// iPad app links (macOS 15, iOS 26). The plugin's extension compiles on its own from that folder against the app's SDK
+// frameworks, so it stays the single source of the widget: it is one SwiftPM target (`Mail42MailWidget`) built from the
+// same files, minus `Extension.swift` (the extension's `@main`, which needs ExtensionKit), and `Sources/Mail42Widgets`
+// maps a widget id to its view.
 
 import Foundation
 import PackageDescription
@@ -29,12 +29,10 @@ let work42SDKRoot = ProcessInfo.processInfo.environment["WORK42_SDK_PATH"]
 let hasSDK = FileManager.default.fileExists(atPath: "\(work42SDKRoot)/Work42PluginKit/Package.swift")
     && FileManager.default.fileExists(atPath: "\(work42SDKRoot)/Work42UI/Package.swift")
 
-// Exactly what `work42 plugin build` passes swiftc (PluginSwiftCompiler.arguments), so a widget means the same thing in
-// both builds.
+// Exactly what `work42 plugin build` passes swiftc, so a widget means the same thing in both builds.
 let widgetSettings: [SwiftSetting] = [
     .enableUpcomingFeature("ExistentialAny"),
     .defaultIsolation(MainActor.self),
-    .define("MAIL42_WIDGETS_LIBRARY"),
 ]
 
 let sdkDependencies: [Target.Dependency] = [
@@ -109,7 +107,8 @@ if hasSDK {
     targets.append(.target(
         name: "Mail42MailWidget",
         dependencies: sdkDependencies,
-        path: "work42-plugin/widgets/mail/Sources",
+        path: "work42-plugin/extension/Sources",
+        exclude: ["Extension.swift"],
         swiftSettings: widgetSettings
     ))
     // Mail42Widgets: widget id -> root view, the one entry point the iPad app (and anything else that hosts the widget
@@ -122,7 +121,8 @@ if hasSDK {
     ))
     targets.append(.testTarget(
         name: "Mail42WidgetsTests",
-        dependencies: ["Mail42Widgets", .target(name: "Mail42MailWidget")] + sdkDependencies,
+        // Mail42TestSupport builds synthetic Envelope Index databases, so the reader is tested against Apple's real column names.
+        dependencies: ["Mail42Widgets", .target(name: "Mail42MailWidget"), "Mail42TestSupport"] + sdkDependencies,
         path: "Tests/Mail42WidgetsTests",
         swiftSettings: widgetSettings
     ))
