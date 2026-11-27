@@ -1,13 +1,13 @@
 // MailModel.swift — the Mail widget's state: what's selected, what's loaded, and how the reader gets its HTML.
 //
-// Everything comes from mail42, which reads Apple Mail's own data live (there is no copy and no sync). The model never
-// talks to it itself: it asks the `MailStore` (an actor, see MailStore.swift) and applies the finished, decoded value,
-// so nothing on the main thread waits for mail. A list load is cancellable and coalesced (the newest request wins),
-// and the list you are looking at stays on screen while a refresh runs.
+// Everything comes from Apple Mail's own data, read live (there is no copy and no sync): in this process on the Mac, through the
+// paired Mac's `mail` tools on the iPad. The model never talks to it itself: it asks the `MailStore` (an actor, see MailStore.swift)
+// and applies the finished, decoded value, so nothing on the main thread waits for mail. A list load is cancellable and
+// coalesced (the newest request wins), and the list you are looking at stays on screen while a refresh runs.
 //
 // The model works only while a tile is on screen (`attach`/`detach`, one owner per visible tile, so one tile going away
-// never stops it for another). While it works it asks nothing on a timer: mail42's daemon tells it when Mail changed
-// (new mail, something read or flagged elsewhere) and it asks again for what it shows. The one exception is waiting for
+// never stops it for another). While it works it asks nothing on a timer: the transport tells it when Mail changed (new
+// mail, something read or flagged elsewhere) and it asks again for what it shows. The one exception is waiting for
 // Full Disk Access: until it is granted the model checks every couple of seconds so the setup screen goes by itself.
 
 import Foundation
@@ -26,8 +26,7 @@ enum MailSelection: Equatable, Hashable {
 
 enum MailLoadState: Equatable {
     case loading
-    case notInstalled
-    /// Full Disk Access isn't granted to mail42 yet: the guided setup is shown and the grant is detected by itself.
+    /// Full Disk Access isn't granted to Work 42 yet: the guided setup is shown and the grant is detected by itself.
     case needsAccess
     /// Access is fine but Apple Mail has nothing to read (no accounts, or Mail was never opened).
     case noMail
@@ -135,7 +134,7 @@ final class MailModel {
     #endif
 
     /// - Parameters:
-    ///   - makeTransport: how requests reach mail42 (the daemon on the Mac, the paired Mac's shell on the iPad); tests pass a fake.
+    ///   - makeTransport: how requests reach Apple Mail (in this process on the Mac, the paired Mac's `mail` tools on the iPad); tests pass a fake.
     ///   - readerFiles: where the reader's HTML lives (macOS); tests pass a temporary folder.
     #if os(macOS)
     init(
@@ -151,7 +150,7 @@ final class MailModel {
     }
     #endif
 
-    /// Where every question to mail42 goes (see MailStore.swift). Made when first needed, dropped when the last tile goes.
+    /// Where every question to Apple Mail goes (see MailStore.swift). Made when first needed, dropped when the last tile goes.
     private var mailStore: MailStore {
         if let storeStorage { return storeStorage }
         let created = MailStore(transport: makeTransport(services))
@@ -159,22 +158,21 @@ final class MailModel {
         return created
     }
 
-    private static func defaultTransport(services: SessionServices?) -> any MailTransport {
+    /// The route to Apple Mail for a tile with `services` (none: the model was made before any tile was attached).
+    static func defaultTransport(services: SessionServices?) -> any MailTransport {
+        guard let services else { return MailUnavailableTransport() }
         #if os(macOS)
-        // The daemon is started through the Work42 shell, which finds `mail42` on its own PATH.
-        guard let services else { return MailServeClient() }
-        let shell = services.shell
-        let fallback: @Sendable () -> any MailTransport = { MailServeClient(startDaemon: MailServeClient.startDaemonCommand(shell: shell)) }
-        // Mail is read in this process through Work42's Full Disk Access and Automation services (no CLI, no daemon). A Work42
-        // that has neither (older than SDK 3.5.0) is the one case that goes to the daemon instead (see MailFallbackTransport).
-        guard let folder = directFolder() else { return fallback() }
-        let direct = MailCtlDirectTransport(
+        // Mail is read in this process through Work42's Full Disk Access and Automation services. The plugin requires SDK 3.5.0, so
+        // a host that runs it always has both.
+        guard let folder = directFolder() else {
+            return MailUnavailableTransport(
+                failure: MailFailure(code: "no_folder", message: "The Mail plugin couldn\u{2019}t prepare its folder."))
+        }
+        return MailCtlDirectTransport(
             disk: services.diskRead, automation: services.automation, directory: folder, configuration: directConfiguration())
-        return MailFallbackTransport(primary: direct, fallback: fallback)
         #else
         // The Mac runs the plugin's own `mail` tools for us (`services.pluginTools`), and the transport asks it for the counters
         // every few seconds while the tile is on screen, less often while it does not answer.
-        guard let services else { return MailUnavailableTransport() }
         return MailPluginToolsTransport(tools: services.pluginTools)
         #endif
     }
@@ -258,7 +256,7 @@ final class MailModel {
         watchTask = Task { [weak self] in
             await self?.bootstrap()
             guard let self else { return }
-            // Nothing is asked on a timer: mail42 says when Mail changed.
+            // Nothing is asked on a timer: the transport says when Mail changed.
             for await _ in self.mailStore.changes() {
                 guard !Task.isCancelled else { return }
                 await self.mailChanged()
@@ -287,7 +285,6 @@ final class MailModel {
     func bootstrap() async {
         if envelopes.isEmpty { state = .loading }
         switch await mailStore.access() {
-        case .notInstalled: state = .notInstalled; waitForAccess()
         case .denied: state = .needsAccess; waitForAccess()
         case .noMailData: state = .noMail; waitForAccess()
         case .unreachable(let message): state = .failed(message)
@@ -295,9 +292,9 @@ final class MailModel {
         }
     }
 
-    private var isWaitingForAccess: Bool { state == .needsAccess || state == .noMail || state == .notInstalled }
+    private var isWaitingForAccess: Bool { state == .needsAccess || state == .noMail }
 
-    /// Until Full Disk Access is granted (or Mail has an account) there is nothing for the daemon to tell us about, so
+    /// Until Full Disk Access is granted (or Mail has an account) there is nothing for the transport to tell us about, so
     /// look again every couple of seconds. This is the only timer, and it stops the moment mail is readable.
     private func waitForAccess() {
         guard accessTask == nil else { return }
@@ -315,11 +312,11 @@ final class MailModel {
     func recheckNow() {
         switch state {
         case .loading, .ready: break
-        case .notInstalled, .needsAccess, .noMail, .failed: Task { await bootstrap() }
+        case .needsAccess, .noMail, .failed: Task { await bootstrap() }
         }
     }
 
-    /// mail42 says Mail changed (new mail, something read, flagged, moved or deleted, here or elsewhere): ask again for
+    /// The transport says Mail changed (new mail, something read, flagged, moved or deleted, here or elsewhere): ask again for
     /// the counters and for the list as it is now, at the same depth, so nothing the user is looking at moves.
     private func mailChanged() async {
         guard state == .ready else { return }
@@ -357,7 +354,6 @@ final class MailModel {
             return
         }
         switch failure.code {
-        case "not_installed": state = .notInstalled; waitForAccess()
         case "fda_denied": state = .needsAccess; waitForAccess()
         case "no_mail_data": state = .noMail; waitForAccess()
         default: state = .failed(failure.message)
@@ -685,7 +681,7 @@ final class MailModel {
         attachments = []
     }
 
-    /// Says why an action failed, in one line (the CLI's own words when it has them).
+    /// Says why an action failed, in one line (the failure's own words when it has them).
     private func report(_ error: any Error, fallback: String) {
         if let failure = error as? MailFailure {
             switch failure.code {
@@ -701,12 +697,17 @@ final class MailModel {
 
     func openFullDiskAccessSettings() async {
         #if os(macOS)
-        // The in-process route cannot open System Settings; Work42 can: its permission broker shows its pill and opens the pane.
-        // A Work42 older than SDK 3.5.0 (the daemon route) throws here, and the old `permissions open` verb does it instead.
-        if let permissions = services?.permissions,
-           (try? await permissions.request(id: PluginPermissionID.fullDiskAccess)) != nil { return }
+        // The extension cannot open System Settings; Work42 can: its permission broker shows its pill and opens the pane.
+        guard let permissions = services?.permissions else { return }
+        do {
+            _ = try await permissions.request(id: PluginPermissionID.fullDiskAccess)
+        } catch {
+            show("Couldn\u{2019}t ask for Full Disk Access: \(error.localizedDescription)")
+        }
+        #else
+        // Full Disk Access belongs to the Mac's Work 42; this device cannot grant it.
+        show("Grant Full Disk Access to Work 42 on your Mac (System Settings \u{203A} Privacy & Security)")
         #endif
-        _ = try? await mailStore.run(["permissions", "open"], priority: .opened, timeout: .seconds(20))
     }
 
     #if os(iOS)
@@ -715,7 +716,7 @@ final class MailModel {
         show("Preview it on your Mac, or save it there")
     }
 
-    /// Saves on the Mac (it is the Mac's mail42 that has the file), and says so.
+    /// Saves on the Mac (it is the Mac's Mail plugin that has the file), and says so.
     func saveAttachment(_ attachment: MailAttachment) async {
         guard let id = expandedID ?? selectedID else { return }
         do {
@@ -980,7 +981,7 @@ final class MailModel {
     }
 
     #if os(iOS)
-    /// Asks the Mac's mail42 for the message with its HTML in the answer (there is no folder to write it to), and
+    /// Asks the Mac's Mail plugin for the message with its HTML in the answer (there is no folder to write it to), and
     /// puts it in Work42's theme.
     private func prepare(id: Int64, priority: MailStore.Priority) async throws -> ReaderEntry {
         let key = "\(id)-\(UUID().uuidString.prefix(8).lowercased())"
@@ -996,10 +997,10 @@ final class MailModel {
             file: nil, url: nil, key: "mail42:\(key)", attachments: listed, theme: tokens.hashValue, html: themed)
     }
     #else
-    /// Asks the CLI for the message (HTML to a file, attachments alongside) off the main thread.
+    /// Reads the message (HTML to a file, attachments alongside) off the main thread.
     private func prepare(id: Int64, priority: MailStore.Priority) async throws -> ReaderEntry {
         guard let directory = readerDirectory() else {
-            throw MailFailure(code: "no_folder", message: "mail42 couldn't prepare a folder to show the message from.")
+            throw MailFailure(code: "no_folder", message: "The Mail plugin couldn't prepare a folder to show the message from.")
         }
         let key = "\(id)-\(UUID().uuidString.prefix(8).lowercased())"
         let file = directory.appendingPathComponent("m\(key).html")

@@ -11,9 +11,9 @@ expanded and the others folded to a line. It works through Apple Mail: reads are
 asked of Mail itself. Replies, forwards and new messages open Mail's own compose window; the user presses Send there.
 Nothing here ever sends.
 
-- **Data source:** only the standalone `mail42` CLI (`envelope list --conversations`, `envelope search`,
-  `message read|thread|resolve`, `attachment list|save`, `mailbox list`, `mark`, `move`, `archive`, `delete`, `junk`,
-  `draft`, `open`). The widget never opens `~/Library/Mail` or scripts Mail itself.
+- **Data source:** Apple Mail itself, with no command-line tool or background service: on the Mac the widget reads Mail's
+  index and message files and asks Mail to act through Work 42's Full Disk Access and Automation permissions; on the iPad it
+  calls the Mail plugin's `mail` tools on the paired Mac. Agents use the same tools (the `mail` skill).
 - **Tab-bar row (two controls):** the inbox switcher (All Inboxes, Flagged, each account's Inbox, with unread counts, and
   an Unread Only switch; its label is the current view and its unread count) and **New** (a new message in Mail).
 - **Widget header:** the view's title and `N unread · M messages` on the left; on the right Reply, Forward, Archive,
@@ -25,39 +25,39 @@ Nothing here ever sends.
   conversation out of the list and open the next one; if Mail refuses, the list is reloaded and a one-line notice says why.
 - **One header:** Back (while a message is open), the search field ("Search <folder> by name, email or subject") and the
   message actions; there is no second bar under it.
-- **Search field:** in the header; accepts the `mail42 envelope search` language, e.g. `from:alice is:unread
+- **Search field:** in the header; accepts the mail query language, e.g. `from:alice is:unread
   date:2w..`; plain words search subject, sender name and address, recipients and Apple's preview line (headers only,
   `--headers`: complete and instant, never the full message text), always within the view you are in. A query that
   isn't valid syntax is searched as literal words.
 - **Reader:** the conversation is a stack of messages, one open at a time (click a line to open it, click the open
   one's top line to fold it; ← → step through it). Highlight text to comment on it. The user's own messages and
   address show their Work42 name and photo instead of "You". Each message has an avatar (the same colours as Meet42 for the same person), sender, `mailbox · account`, date, subject,
-  To/Cc and a **Details** toggle; attachment cards (Quick Look, Save to Downloads); the message in Work42's theme
+  To/Cc and a **Details** toggle; attachment cards (Quick Look, Save: into `~/.work42/mail42/attachments`, shown in Finder); the message in Work42's theme
   (ordinary mail takes the app's font, colours and accent; designed mail, such as newsletters, stays as designed on a
   light card), earlier quoted text folded behind "Show quoted text". Links open through Work42's Open Link.
 - **mail42:// links:** clicking `mail42://message/<id>?mid=<Message-ID>` anywhere in Work42 reveals this tile and
   opens that message, even if Mail has moved it since. Outside the current list it shows `In <mailbox> · <account>`;
   if it is gone it says "This message is no longer in Mail".
 - **Highlight-to-comment:** selecting text in the reader offers a comment. It arrives in the chat composer labelled
-  `Mail42 · <subject> · <sender> (<link>)`: open the link or run `mail42 message read <id>` for the full message.
+  `Mail42 · <subject> · <sender> (<link>)`: open the link or call the `read_message` tool (the `mail` skill) for the full message.
 
 ## Setup states
 
 | The tile says | Meaning | Fix |
 |---|---|---|
-| mail42 isn't installed | no `mail42` on PATH | ask the agent to set up mail42 (the `mail42-setup` skill) |
-| Let mail42 read your Mail (3 steps) | Full Disk Access isn't granted to mail42.app | **Open Settings**, turn on mail42; the tile continues by itself |
+| Let Work 42 read your Mail (3 steps) | Full Disk Access isn't granted to Work 42 | **Open Settings** (Work 42 asks through its pill), turn on Work 42; the tile continues by itself. On the iPad, do it on the Mac |
 | No Mail accounts found | Apple Mail has no accounts | add an account in Mail; the tile shows it by itself |
+| Couldn't read your mail (+ a reason) | the host or the paired Mac did not answer | **Try again**; the reason says what to fix |
 
-The first action on a message (mark, move, …) makes macOS ask whether mail42 may control Mail: choose **Allow**.
+The first action on a message (mark, move, …) makes macOS ask whether Work 42 may control Mail: choose **Allow**.
 Until then the list and reader keep working; actions show a notice saying what to turn on.
 
 ## Notes for agents
 
-- The tile refreshes itself: every few seconds it re-reads Apple Mail's mailbox counters and reloads the list when
-  they change (new mail, something read or flagged elsewhere).
+- The tile refreshes itself: it reloads the list when Apple Mail's mailboxes change (new mail, something read or flagged
+  elsewhere).
 - The reader files live under `~/.work42/mail42/reader/artifacts/mail42-reader/` (registered with the artifact
   server under mail42's own id, so the widget works in a session tab and on the session-less workspace home); they
   are disposable and only the latest few are kept.
-- Message ids can change when Mail moves a message; use the link (`mail42 message resolve <link>`) rather than an id
+- Message ids can change when Mail moves a message; pass the `mail42://` link to the `mail` tools rather than an id
   you saw earlier.

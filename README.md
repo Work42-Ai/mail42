@@ -2,30 +2,35 @@
 
 Apple Mail for you and your agents. mail42 works with the mail that Apple Mail already keeps on your Mac: it reads
 it live (no copy, no database, no sync) and asks Apple Mail itself to mark, flag, move, archive, delete or draft.
-It has a small CLI (`--json` everywhere) for agents and a Work42 widget, **Mail42**, for you. It never sends mail:
-replies and new messages open as drafts in Mail's own compose window, and you press Send there.
+There are two ways in, and they are separate:
 
-It mirrors [meet42](https://github.com/Work42-Ai/meet42): a signed `mail42.app` (bundle id `com.work42.mail42`)
-owns the permissions, and the Work42 plugin in `work42-plugin/` only talks to the CLI.
+- **The Work42 plugin** (`work42-plugin/`): the **Mail42** widget for you and the `mail` MCP tools for your agents. It needs
+  **no command-line tool and no background service**: the widget and the tools read and act inside the plugin's own process,
+  through Work 42's Full Disk Access and Automation permissions (the plugin requires SDK 3.5.0). The iPad uses the same tools on
+  your paired Mac.
+- **The standalone `mail42` CLI** (`Sources/mail42`, with `--json` everywhere): a command-line tool over the same mail. It stays in
+  this repository as a separate tool (with its `mail42 serve` daemon and its signed `mail42.app`), but **the plugin no longer
+  depends on it**: installing or running the plugin never installs, starts or calls it.
 
-> Status: 0.1.0, not yet released. The CLI (`permissions`, `mailbox`, `envelope`, `message`, `attachment`, `open`,
-> `mark`, `move`, `archive`, `delete`, `junk`, `draft`), the Mail42 widget and the `mail42-setup` / `mail42-cli` skills
-> are built; the reading and acting verbs are tested against synthetic mailboxes and checked on a real one.
+It never sends mail: replies and new messages open as drafts in Mail's own compose window, and you press Send there.
+
+> Status: 0.1.0, not yet released. The Mail42 widget, the `mail` tools and the CLI (`permissions`, `mailbox`, `envelope`,
+> `message`, `attachment`, `open`, `mark`, `move`, `archive`, `delete`, `junk`, `draft`) are built; the reading and acting verbs
+> are tested against synthetic mailboxes and checked on a real one.
 
 ## Install
 
-mail42 is distributed only inside [Work42](https://github.com/work42-ai/work42): there is no standalone download. The
-Work42 app embeds the signed `mail42.app`, copies it to `~/.work42/mail42.app` at launch, links the command at
-`~/.work42/bin/mail42` and updates it with the app. Work42 puts `~/.work42/bin` on your PATH. Ask an agent in Work42 to
-"set up mail42" (the `mail42-setup` skill) for the Full Disk Access walk-through.
+mail42 is distributed only inside [Work42](https://github.com/work42-ai/work42): there is no standalone download. The plugin is
+built in to Work42: the app installs it at launch, it can't be removed or updated on its own, and it is pinned by git tag in
+Work42's `BuiltInPlugins.json`. Nothing else is installed: there is no `mail42` command on your PATH for the plugin, and no
+`mail42-setup` step. The first time Mail needs a permission, Work 42 asks you through its pill (see Permissions).
 
 ### The Work42 plugin
 
-The plugin adds the **Mail42** widget (`widget:mail`) and two skills for agents: `mail42-setup` (check and
-permissions) and `mail42-cli` (how to read and act on mail). It is built in to Work42: the app installs it at launch, it
-can't be removed or updated on its own, and it is pinned by git tag in Work42's `BuiltInPlugins.json`.
-
-The widget only runs the `mail42` CLI; it never reads or scripts Apple Mail itself.
+The plugin adds the **Mail42** widget (`widget:mail`) and the `mail` MCP tools, taught to agents by one skill, `mail`
+(`work42-plugin/skills/mail`): search and read mail, follow a thread, save an attachment, link to a message, and, only when you
+ask, mark, flag, move, archive, delete or junk a message or open a reply draft. It reads Apple Mail's own files and asks Mail to
+act; it never scripts anything else.
 
 **Mail42 in Work42:**
 
@@ -41,42 +46,46 @@ The widget only runs the `mail42` CLI; it never reads or scripts Apple Mail itse
 
 ## Permissions
 
-mail42 needs two macOS permissions, each asked for once. Both belong to the signed `mail42.app`, so they survive
-updates signed with the same Developer ID. (Local ad-hoc builds from `swift build` have a different signature each
-time, so macOS may ask again.)
+**The plugin** needs two macOS permissions, both held by **Work 42** (the plugin declares them in `plugin.yaml`; Work 42 asks
+you through its pill the first time they are needed):
 
-**Full Disk Access** (to read Apple Mail's files in `~/Library/Mail`). macOS can't show a prompt for it; you switch it
-on:
+- **Full Disk Access** (to read Apple Mail's files in `~/Library/Mail`). macOS can't show a prompt for it: Work 42 opens
+  System Settings → Privacy & Security → Full Disk Access and you turn on **Work 42**. The Mail42 tile shows the steps and
+  carries on by itself. On the iPad, grant it on the Mac.
+- **Automation** for Mail (to act on mail). The first time you or an agent marks, moves, archives, deletes or drafts a message,
+  macOS asks whether Work 42 may control Mail: choose **Allow**. Reading mail never needs it.
 
-1. `mail42 permissions open` (or System Settings → Privacy & Security → Full Disk Access).
-2. Turn on **mail42**. If it isn't listed, press **+** and choose `~/.work42/mail42.app`.
-3. `mail42 permissions` should now say `granted`. The Mail42 tile shows the same three steps and carries on by itself.
-
-**Automation** (to act on mail). The first time you or an agent marks, moves, archives, deletes or drafts a message,
-macOS asks whether mail42 may control Mail: choose **Allow**. `mail42 permissions automation` triggers that question and
-waits for the answer; `--check` only reports `granted`, `denied` or `not_determined`. Reading mail never needs it.
+**The standalone CLI** has its own: it needs two macOS permissions, each asked for once, and both belong to the signed
+`mail42.app`, so they survive updates signed with the same Developer ID. (Local ad-hoc builds from `swift build` have a different
+signature each time, so macOS may ask again.) For Full Disk Access run `mail42 permissions open`, turn on **mail42** (press **+**
+and choose `~/.work42/mail42.app` if it isn't listed) and check with `mail42 permissions`; for Automation,
+`mail42 permissions automation` triggers the question and waits for the answer (`--check` only reports `granted`, `denied` or
+`not_determined`).
 
 ## What mail42 touches
+
+This is the standalone CLI. The plugin reads the same Apple Mail files in its own process through Work 42's Full Disk Access, and
+writes only under `~/.work42/mail42/` (`reader/` for the message being shown, `attachments/` for saved attachments).
 
 | Path | What |
 |---|---|
 | `~/Library/Mail/V*/` | Apple Mail's own store. **Only ever read**, never written: the index is opened read-only, in place, with short reads that never hold a lock Mail would wait for |
 | `~/Library/Accounts/Accounts4.sqlite` | Read, to name accounts as Mail does |
 | `~/.work42/mail42/reader/` | The Mail42 tile's disposable files (the message being shown); nothing else is kept |
-| `~/Library/Group Containers/74RFQFPVQ9.com.work42.mail42/serve.*` | The service's socket, lock and log (see below). An app group, so Work42's sandboxed widget can reach the socket |
+| `~/Library/Group Containers/74RFQFPVQ9.com.work42.mail42/serve.*` | The service's socket, lock and log (see below) |
 
 Everything that changes mail goes through Mail.app as Apple Events: Mail does it, syncs it to the server and updates its
 own index. mail42 holds no passwords and no copy of your mail.
 
 ## The service
 
-`mail42 serve` is one background process per user that keeps Mail's index open and answers every client at once: the Mail
-widget, the Work42 Mac app (for the iPad) and the commands below. Actions that drive Mail go through it one at a time, so a
-busy Mail never holds up reading, and it tells the widget when Mail changed instead of being asked again and again.
+`mail42 serve` belongs to the standalone CLI; the Work42 plugin does not start or use it. It is one background process per user
+that keeps Mail's index open and answers every CLI client at once. Actions that drive Mail go through it one at a time, so a
+busy Mail never holds up reading.
 
-You never need to start it: the widget and Work42 do (`mail42 serve --detach`), it exits by itself after ten idle minutes,
-and every command uses it when it is running and works alone when it isn't, with the same output either way
-(`MAIL42_NO_SERVE=1` forces working alone). The protocol is in [docs/serve-protocol.md](docs/serve-protocol.md).
+You never need to start it: the commands do (`mail42 serve --detach`), it exits by itself after ten idle minutes, and every
+command uses it when it is running and works alone when it isn't, with the same output either way (`MAIL42_NO_SERVE=1` forces
+working alone). The protocol is in [docs/serve-protocol.md](docs/serve-protocol.md).
 
 New in 0.3.0: the service; the index is read in place instead of copied (the copy is only a fallback); a run that was killed
 no longer leaves a copy behind.
@@ -163,7 +172,7 @@ they would run instead of running it. The end-to-end tests set all of these, so 
 MAIL42_ACTIONS_DRY_RUN=1 mail42 archive 4211 --json   # shows the script; changes nothing
 ```
 
-`scripts/build-mail42.sh` builds the signed app bundle (ad-hoc when `DEVELOPER_ID` is unset). The Mail42 widget is built
+`scripts/build-mail42.sh` builds the signed CLI app bundle (ad-hoc when `DEVELOPER_ID` is unset). The Mail42 widget is built
 by Work42 itself: to try a checkout inside a Work42 app build, point the embed step at it with
 `WORK42_BUILTIN_MAIL42_PATH="$PWD"` (see `app/scripts/embed-builtin-plugins.sh` in the work42 repo).
 

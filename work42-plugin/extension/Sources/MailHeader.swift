@@ -2,7 +2,7 @@
 // the message actions on the right (Work42 itself adds its ⋯ and × after them). Plus the menu those actions share
 // with a row's right-click, and the keyboard shortcuts.
 //
-// Every action goes through `MailModel.perform`, which asks Apple Mail through the `mail42` CLI. Reply, Forward and New
+// Every action goes through `MailModel.perform`, which asks Apple Mail through the model's `MailStore`. Reply, Forward and New
 // open Mail's own compose window: the person presses Send there.
 
 import SwiftUI

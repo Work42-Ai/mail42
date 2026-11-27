@@ -391,8 +391,8 @@ private struct MailBodyView: View {
                 text: "Apple Mail hasn\u{2019}t fetched its body yet. Open it in Mail to download it.")
         case .needsAccess:
             MailPlaceholder(
-                symbol: "lock.shield", title: "mail42 can\u{2019}t read this message",
-                text: "Full Disk Access isn\u{2019}t granted to mail42.")
+                symbol: "lock.shield", title: "Mail can\u{2019}t read this message",
+                text: "Full Disk Access isn\u{2019}t granted to Work 42.")
         case .failed(_, let message):
             VStack(spacing: DT.s8) {
                 MailPlaceholder(symbol: "exclamationmark.triangle", title: "Couldn\u{2019}t open the message", text: message)

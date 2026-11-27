@@ -31,10 +31,6 @@ struct MailBody: View {
             switch model.state {
             case .loading:
                 MailSkeleton()
-            case .notInstalled:
-                MailPlaceholder(
-                    symbol: "terminal", title: "mail42 isn\u{2019}t installed",
-                    text: "Ask the agent in a session to set up mail42: it installs the tool and walks you through Full Disk Access.")
             case .needsAccess:
                 MailAccessView(model: model)
             case .noMail:
@@ -121,8 +117,8 @@ private struct MailAccessView: View {
                 .foregroundStyle(Color.accentColor)
                 .frame(width: 50, height: 50)
                 .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(DT.chipFill))
-            Text("Let mail42 read your Mail").font(.system(size: DT.f12, weight: .semibold))
-            Text("Apple Mail keeps messages in a protected folder. mail42 only reads them, and keeps no copy.")
+            Text("Let Work 42 read your Mail").font(.system(size: DT.f12, weight: .semibold))
+            Text("Apple Mail keeps messages in a protected folder. The Mail plugin only reads them, and keeps no copy.")
                 .font(.system(size: DT.f10)).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center).frame(maxWidth: 320)
             VStack(alignment: .leading, spacing: DT.s8) {
@@ -130,7 +126,7 @@ private struct MailAccessView: View {
                     Button("Open Settings") { Task { await model.openFullDiskAccessSettings() } }
                         .glassSubtleCapsule(tint: DT.systemAccent)
                 }
-                step(2, "Turn on mail42. If it isn\u{2019}t listed, press + and choose mail42 in your .work42 folder.") { EmptyView() }
+                step(2, "Turn on Work 42. If it isn\u{2019}t listed, press + and choose Work 42 in your Applications folder.") { EmptyView() }
                 step(3, "Come back here. This continues by itself.") {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.mini)

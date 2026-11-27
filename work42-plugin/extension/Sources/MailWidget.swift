@@ -1,6 +1,6 @@
 // MailWidget.swift — Mail42: a mail client over Apple Mail, inside Work42.
 //
-// Everything comes from the `mail42` CLI, which reads Apple Mail live and asks Mail itself to act. Two controls sit in
+// Everything comes from Apple Mail, read live and asked to act through Work 42's services. Two controls sit in
 // the tab-bar row (the inbox switcher and New); everything that acts on a message is in the widget header (see
 // MailHeader), on a row's right-click, or on the keyboard. The tile itself is a conversation list beside the reader.
 // Links only Work42PluginKit + Work42UI.

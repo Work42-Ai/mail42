@@ -507,7 +507,6 @@ nonisolated final class MailCtlDirectTransport: MailTransport, Sendable {
             case .granted: state = "granted"
             case .denied: state = "denied"
             case .noMailData: state = "noMailData"
-            case .notInstalled: state = "denied"
             case .unreachable(let text):
                 throw Escape(failure: MailFailure(code: MailCtl.lacksHost(text) ? MailCtl.hostUnsupportedCode : "mail_unreachable", message: text))
             }

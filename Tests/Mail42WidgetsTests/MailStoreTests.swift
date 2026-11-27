@@ -92,24 +92,27 @@ struct MailStoreTests {
         #expect(echo.echo == "mailbox list --json")
     }
 
-    @Test("access: a missing command is 'not installed'")
-    func accessNotInstalled() async {
-        let store = MailStore(transport: FailingTransport(MailFailure.notInstalled))
-        guard case .notInstalled = await store.access() else { Issue.record("expected .notInstalled"); return }
-    }
-
-    @Test("access: any other failure says what failed instead of 'not installed'")
+    @Test("access: a failure says what failed; it is never read as 'no access'")
     func accessUnreachable() async {
         let refused = MailFailure(code: "service_version", message: "Work42's mail42 (0.3.2) is newer than this widget (0.4.0). Update Work42.")
         guard case .unreachable(let message) = await MailStore(transport: FailingTransport(refused)).access() else {
-            Issue.record("a refusing service must not read as 'not installed'"); return
+            Issue.record("a refusing host must read as unreachable"); return
         }
         #expect(message == refused.message)
 
         guard case .unreachable(let other) = await MailStore(transport: FailingTransport(CancellationError())).access() else {
-            Issue.record("a non-MailFailure error must not read as 'not installed'"); return
+            Issue.record("a non-MailFailure error must read as unreachable"); return
         }
         #expect(!other.isEmpty)
+    }
+
+    @Test("access: a model with no services is unreachable and says Mail needs Work 42 (not a missing tool)")
+    func accessWithoutServices() async {
+        guard case .unreachable(let message) = await MailStore(transport: MailUnavailableTransport()).access() else {
+            Issue.record("the unavailable transport must read as unreachable"); return
+        }
+        #expect(message.contains("Work 42"))
+        #expect(!message.lowercased().contains("install"))
     }
 
     @Test("the most urgent waiting request starts first, then the earliest")

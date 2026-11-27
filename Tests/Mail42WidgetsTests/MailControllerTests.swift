@@ -262,7 +262,6 @@ private func label(_ access: MailAccess) -> String {
     case .granted: return "granted"
     case .denied: return "denied"
     case .noMailData: return "noMailData"
-    case .notInstalled: return "notInstalled"
     case .unreachable(let text): return "unreachable: \(text)"
     }
 }

@@ -158,6 +158,4 @@ nonisolated struct MailErrorEnvelope: Codable {
 nonisolated struct MailFailure: Error, Equatable {
     let code: String
     let message: String
-
-    static let notInstalled = MailFailure(code: "not_installed", message: "mail42 isn't installed.")
 }

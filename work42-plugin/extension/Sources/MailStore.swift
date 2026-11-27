@@ -104,9 +104,8 @@ actor MailStore {
             let report = try? JSONDecoder().decode(MailPermissionsReport.self, from: result.stdout)
             return report?.fullDiskAccess == "noMailData" ? .noMailData : .denied
         } catch let failure as MailFailure {
-            // Only a missing command is "not installed". A service that refuses, runs another version, does not start or times
-            // out is something else, and the tile says what (it used to say "isn't installed" for all of them).
-            return failure.code == MailFailure.notInstalled.code ? .notInstalled : .unreachable(failure.message)
+            // A host that refuses, does not answer or times out is not "no access": the tile says what went wrong.
+            return .unreachable(failure.message)
         } catch {
             return .unreachable(error.localizedDescription)
         }
@@ -190,7 +189,7 @@ actor MailStore {
 
         if running[entry.key] === entry {
             running[entry.key] = nil                                 // nobody can join a question being cancelled
-            entry.task?.cancel()                                     // the transport tells the daemon; `finish` frees the slot
+            entry.task?.cancel()                                     // the transport ends the request; `finish` frees the slot
         } else {
             queued.removeAll { $0 === entry }
         }
