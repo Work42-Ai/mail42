@@ -10,8 +10,12 @@
 //   - nothing is retried, here or by the transport: the widget refreshes on demand, and an action is never run twice.
 //   - one `run` is one user action and has one request id. A tool that changes mail makes exactly one call, so a retry from below the
 //     transport (the same id) is the Mac's no-replay ledger's to answer; a new `run` is a new id and a new action.
-//   - `outcome_unknown` (the Mac cannot say whether it ran) and a call lost on the way to a changing tool both leave as an
-//     `outcome_unknown` failure that says to look on the Mac before doing it again.
+//   - `outcome_unknown` (the Mac cannot say whether it ran), a call lost on the way to a changing tool, a changing call cancelled
+//     after it was sent (the store gives up on it after its timeout) and the link's own timeout of one all leave as an
+//     `outcome_unknown` failure that says to look on the Mac before doing it again. A call cancelled before it was sent is a
+//     plain cancellation: it certainly did not run.
+//   - ids and cursors travel as JSON numbers (doubles): one that a double cannot hold exactly (beyond 2^53) is refused here, and one
+//     in an answer is `bad_output`, so the Mac's `Int(number)` is never given a number it would trap on.
 //
 // Failures a call can end with: `mac_unreachable`, `outcome_unknown` and `not_permitted` are thrown (they are the link's, as the shell
 // transport threw them); a failure of the tool itself (`fda_denied`, `not_found`, `bad_query`, …) comes back as the CLI printed it, a
@@ -19,8 +23,8 @@
 //
 // Not mappable (they answer `unsupported_in_extension` or `usage`, never run something else): `draft new` (no tool), `message read --out`
 // and `--headers`, `permissions open|automation`. Differences that are answered, not refused: `--limit` above a tool's 100 pages a list
-// with `before_id` (a search is cut at 100: it has no paging), `attachment save --to` saves where the tool does (the Mac's attachments
-// folder), and `message resolve --prefer-mailbox` is not passed (the tool has no such argument).
+// or a search with `before_id` (a search up to 500 results), `attachment save --to` saves where the tool does (the Mac's attachments
+// folder), and `message resolve --prefer-mailbox` is passed to `get_message_link` as `prefer_mailbox`.
 
 import Foundation
 import Work42PluginKit
@@ -136,9 +140,16 @@ nonisolated final class MailPluginToolsTransport: MailTransport, @unchecked Send
         return answer
     }
 
-    private static let badOutput = Refusal(failure: MailFailure(code: "bad_output", message: "Your Mac answered with something this device can\u{2019}t read."))
+    fileprivate static let badOutput = Refusal(failure: MailFailure(code: "bad_output", message: "Your Mac answered with something this device can\u{2019}t read."))
 
-    static let checkOnMac = "Your Mac didn\u{2019}t confirm whether Mail did it. Check on your Mac before doing it again."
+    static let checkOnMac = MailFailure.checkOnMac
+
+    /// Whether the service's `mac_unreachable` says the Mac was asked and did not answer in time (as against: no Mac to reach, which
+    /// is said before anything is sent). The service gives only its words, so it is read by them.
+    private static func isTimeout(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        return lowered.contains("in time") || lowered.contains("timed out") || lowered.contains("timeout")
+    }
 
     private static func unreachable(_ text: String) -> MailFailure {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -147,13 +158,16 @@ nonisolated final class MailPluginToolsTransport: MailTransport, @unchecked Send
         return MailFailure(code: "mac_unreachable", message: "Your Mac didn\u{2019}t answer" + (trimmed.isEmpty ? "." : ": \(trimmed)"))
     }
 
+    /// `error` came back from `tools.call`, so the call was handed to the link (a cancellation before that is `call`'s own and never gets
+    /// here). A changing call that was sent and then cancelled, or that timed out, may have run: it is `outcome_unknown`, not a failure.
     private static func map(_ error: any Error, changing: Bool) -> any Error {
-        if error is CancellationError { return error }
+        if error is CancellationError { return changing ? MailFailure.outcomeUnknown : error }
         if let failure = error as? PluginToolFailure {
             switch failure.code {
             case PluginToolFailure.cancelled.code:
-                return CancellationError()
+                return changing ? MailFailure.outcomeUnknown : CancellationError()
             case PluginRemoteFailure.macUnreachable:
+                if changing, isTimeout(failure.message) { return MailFailure.outcomeUnknown }
                 return unreachable(failure.message)
             case PluginRemoteFailure.outcomeUnknown:
                 return MailFailure(code: "outcome_unknown", message: changing ? checkOnMac : "Your Mac didn\u{2019}t confirm its answer.")
@@ -206,19 +220,45 @@ nonisolated final class MailPluginToolsTransport: MailTransport, @unchecked Send
         case "search":
             let query = words.dropFirst().joined(separator: " ")
             guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { throw Self.usage("usage: envelope search \"<query>\" [--limit N]") }
-            // The tool has no paging for a search: a larger limit is cut at the tool's own.
-            let limit = min(try Words.intFlag(args, "--limit", min: 1) ?? 50, MailTools.maxLimit)
-            var arguments: [String: WidgetJSONValue] = ["query": .string(query), "limit": .number(Double(limit))]
-            if args.contains("--headers") { arguments["headers_only"] = .bool(true) }
-            let answer = try await call("search_messages", arguments)
-            guard let messages = answer.field("messages") else { throw Self.badOutput }
-            var result = try Self.success(messages)
-            // On stderr, as the CLI printed it, so the JSON stays a plain array.
-            if let note = answer.field("note")?.text { result = MailCLIResult(status: 0, stdout: result.stdout, stderr: "mail42: \(note)\n") }
-            return result
+            return try await search(query, args)
         default:
             throw Self.usage("usage: envelope list [-m <mailbox>] [--conversations] … | envelope search \"<query>\" [--limit N]")
         }
+    }
+
+    /// The most results a search is paged to, however large the `--limit`.
+    static let maxSearchResults = 500
+
+    /// `envelope search`: pages of the tool (at most `maxLimit` at a time, newest first, each page starting after the last id of the one
+    /// before) until `--limit` results (at most `maxSearchResults`) are found or there are no more. A read: no request id is shared.
+    private func search(_ query: String, _ args: [String]) async throws -> MailCLIResult {
+        let limit = min(try Words.intFlag(args, "--limit", min: 1) ?? 50, Self.maxSearchResults)
+        var base: [String: WidgetJSONValue] = ["query": .string(query)]
+        if args.contains("--headers") { base["headers_only"] = .bool(true) }
+        var found: [WidgetJSONValue] = []
+        var seen = Set<Int>()
+        var notes: [String] = []
+        var before: Int?
+        while found.count < limit {
+            var page = base
+            page["limit"] = .number(Double(min(MailTools.maxLimit, limit - found.count)))
+            if let before { page["before_id"] = .number(Double(before)) }
+            let answer = try await call("search_messages", page)
+            guard let messages = answer.field("messages")?.items else { throw Self.badOutput }
+            for message in messages {
+                guard let id = message.field("id")?.integer else { throw Self.badOutput }
+                if seen.insert(id).inserted { found.append(message) }
+            }
+            if let note = answer.field("note")?.text, !notes.contains(note) { notes.append(note) }
+            guard !messages.isEmpty, let next = try answer.field("next_before_id")?.cursor() else { break }
+            before = next
+        }
+        var result = try Self.success(.array(Array(found.prefix(limit))))
+        // On stderr, as the CLI printed it, so the JSON stays a plain array.
+        if !notes.isEmpty {
+            result = MailCLIResult(status: 0, stdout: result.stdout, stderr: notes.map { "mail42: \($0)\n" }.joined())
+        }
+        return result
     }
 
     /// `envelope list`: pages of the tool (it gives at most `maxLimit` at a time) until `--limit` messages are found or there are no more.
@@ -229,11 +269,8 @@ nonisolated final class MailPluginToolsTransport: MailTransport, @unchecked Send
         if args.contains("--flagged") { base["flagged_only"] = .bool(true) }
         if args.contains("--conversations") { base["conversations"] = .bool(true) }
         if let mailbox = Words.value(args, "-m") ?? Words.value(args, "--mailbox") { base["mailbox"] = .string(mailbox) }
-        var before: Int64?
-        if let raw = Words.value(args, "--before") {
-            guard let id = Int64(raw) else { throw Self.usage("--before takes an envelope id, not `\(raw)`") }
-            before = id
-        }
+        var before: Int?
+        if let raw = Words.value(args, "--before") { before = try Words.exactID(raw, flag: "--before", what: "an envelope id") }
         var found: [WidgetJSONValue] = []
         while found.count < limit {
             let wanted = min(MailTools.maxLimit, limit - found.count)
@@ -243,8 +280,8 @@ nonisolated final class MailPluginToolsTransport: MailTransport, @unchecked Send
             let answer = try await call("list_messages", page)
             guard let messages = answer.field("messages")?.items else { throw Self.badOutput }
             found += messages
-            guard !messages.isEmpty, let next = answer.field("next_before_id")?.integer else { break }
-            before = Int64(next)
+            guard !messages.isEmpty, let next = try answer.field("next_before_id")?.cursor() else { break }
+            before = next
         }
         return try Self.success(.array(Array(found.prefix(limit))))
     }
@@ -263,9 +300,10 @@ nonisolated final class MailPluginToolsTransport: MailTransport, @unchecked Send
             guard !args.contains("--headers") else { throw Self.usage("`message read --headers` is not available on this device") }
             let html = args.contains("--html")
             let answer = try await call("read_message", ["id": .string(id), "format": .string(html ? "html" : "text")])
-            // The CLI's keys (the tool also says whether it cut the body, which the CLI does not).
+            // The CLI's keys, and `truncated`: the tool cuts a long body, and the widget must not show a cut message as whole.
             var read: [String: WidgetJSONValue] = [:]
             for key in ["envelope", "headers", "text", "html", "attachments", "body_unavailable"] { read[key] = answer.field(key) ?? .null }
+            read["truncated"] = .bool(answer.field("truncated")?.flag ?? false)
             return try Self.success(.object(read))
         case "thread":
             guard let id = words.dropFirst().first else { throw Self.usage("expected a message id (a number from `envelope list`)") }
@@ -276,8 +314,13 @@ nonisolated final class MailPluginToolsTransport: MailTransport, @unchecked Send
             guard let text = words.dropFirst().first else {
                 throw Self.usage("usage: message resolve <mail42://message/\u{2026} link | id> [--prefer-mailbox <id>]")
             }
-            // No tool answers one envelope: the link tool finds the message wherever Mail has put it, its conversation holds its envelope.
-            let link = try await call("get_message_link", ["id": .string(text)])
+            // No tool answers one envelope: the link tool finds the message wherever Mail has put it (preferring the copy in
+            // `--prefer-mailbox`), its conversation holds its envelope.
+            var linkArguments: [String: WidgetJSONValue] = ["id": .string(text)]
+            if let raw = Words.value(args, "--prefer-mailbox") {
+                linkArguments["prefer_mailbox"] = .number(Double(try Words.exactID(raw, flag: "--prefer-mailbox", what: "a mailbox id")))
+            }
+            let link = try await call("get_message_link", linkArguments)
             guard let id = link.field("id")?.integer else { throw Self.badOutput }
             let thread = try await call("read_thread", ["id": .string(String(id))])
             guard let found = thread.field("messages")?.items?.first(where: { $0.field("id")?.integer == id }) else {
@@ -442,6 +485,18 @@ private nonisolated enum Words {
         return result
     }
 
+    /// An id the tools take as a JSON number: a whole number a double holds exactly (|n| ≤ 2^53). Anything else (Int64.max rounds to
+    /// 2^63, which the Mac's `Int(number)` would trap on) is refused here, before the Mac is asked.
+    static func exactID(_ raw: String, flag: String, what: String) throws -> Int {
+        guard let id = Int64(raw) else {
+            throw Refusal(failure: MailFailure(code: "usage", message: "\(flag) takes \(what), not `\(raw)`"))
+        }
+        guard WidgetJSONValue.isExact(id) else {
+            throw Refusal(failure: MailFailure(code: "usage", message: "\(flag) `\(raw)` is too large to be \(what)"))
+        }
+        return Int(id)
+    }
+
     static func intFlag(_ args: [String], _ name: String, min: Int) throws -> Int? {
         guard let raw = value(args, name) else { return nil }
         guard let number = Int(raw), number >= min else {
@@ -462,8 +517,28 @@ private nonisolated extension WidgetJSONValue {
         if case .array(let array) = self { return array }
         return nil
     }
+    /// 2^53: every whole number up to it is held exactly by a double (and by a JSON number); beyond it ids are not safe.
+    static let maxExact: Int64 = 1 << 53
+
+    static func isExact(_ value: Int64) -> Bool { value >= -maxExact && value <= maxExact }
+
+    /// A whole number a double holds exactly, else nil (a fraction, a NaN, anything beyond 2^53): never a trap.
     var integer: Int? {
-        if case .number(let number) = self { return Int(number) }
+        if case .number(let number) = self, number.isFinite, number.rounded() == number, abs(number) <= Double(Self.maxExact) {
+            return Int(number)
+        }
+        return nil
+    }
+
+    /// An absent or null cursor is nil; one that is there but not an exact whole number is not something to page by.
+    func cursor() throws -> Int? {
+        if self == .null { return nil }
+        guard let value = integer else { throw MailPluginToolsTransport.badOutput }
+        return value
+    }
+
+    var flag: Bool? {
+        if case .bool(let flag) = self { return flag }
         return nil
     }
     var text: String? {

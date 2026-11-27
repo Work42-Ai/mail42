@@ -464,10 +464,7 @@ enum MailTools {
                 options.unreadOnly = try args.optionalBool("unread_only") ?? false
                 options.flaggedOnly = try args.optionalBool("flagged_only") ?? false
                 options.conversations = try args.optionalBool("conversations") ?? false
-                if let before = try args.optionalInt("before_id") {
-                    guard before > 0 else { throw invalid("'before_id' must be a message id", "pass the id of the last message you were given") }
-                    options.beforeID = Int64(before)
-                }
+                options.beforeID = try beforeID(args)
                 if let mailbox = try args.optionalString("mailbox")?.trimmingCharacters(in: .whitespaces), !mailbox.isEmpty {
                     options.mailbox = MailCtl.ListOptions.selector(mailbox)
                 }
@@ -481,11 +478,13 @@ enum MailTools {
                 id: "search_messages",
                 description: "Searches the user's Apple Mail with the mail42 query language, newest first. Plain words match subject, sender, recipients and the message text "
                     + "(text is read from the newest messages, which takes seconds on a big mailbox: the answer's note says when it could not read them all; narrow with from:, in: or date:). "
+                    + "To page, pass the previous answer's next_before_id as before_id. "
                     + "Terms: from:x to:x subject:x body:x, in:inbox|<mailbox id>|<name>, is:unread is:read is:flagged, has:attachment, "
                     + "date:2w.. date:..3d date:2026-10-01..2026-10-15 (d days, w weeks, m months ago). Combine with and, or, not and parentheses; quote phrases.",
                 input: .object([
                     "query": .string("The search, e.g. from:alice is:unread date:2w.. \"quarterly report\""),
                     "limit": .integer("How many to return (default \(defaultLimit), at most \(maxLimit))").optional,
+                    "before_id": .integer("Only messages older than this one: the last id of the previous page (next_before_id)").optional,
                     "headers_only": .boolean("Match only subject, sender, recipients and Apple's preview line (instant, never reads message text)").optional,
                 ])) { args, context in
                 let query = try args.string("query")
@@ -499,8 +498,9 @@ enum MailTools {
                 }
                 let wanted = try limit(args)
                 let headersOnly = try args.optionalBool("headers_only") ?? false
+                let before = try beforeID(args)
                 return try await run(sessions, context) { session in
-                    let outcome = try await session.controller.search(query, limit: wanted, headersOnly: headersOnly)
+                    let outcome = try await session.controller.search(query, limit: wanted, headersOnly: headersOnly, before: before)
                     return try .structured(page(outcome.records, limit: wanted, note: outcome.note))
                 }
             },
@@ -516,7 +516,7 @@ enum MailTools {
                 return try await run(sessions, context) { session in
                     let target = try await session.controller.resolve(try args.string("id"))
                     let message = try await session.controller.message(target.id, mode: html ? .html : .text)
-                    let body = capped(message.content)
+                    let body = capped(message.content, html: html)
                     return try .structured(MailToolMessage(
                         envelope: MailToolEnvelope(message.envelope), headers: message.headers,
                         text: html ? nil : body.text, html: html ? body.text : nil, attachments: message.attachments,
@@ -566,9 +566,13 @@ enum MailTools {
                 id: "get_message_link",
                 description: "The links to a message: the mail42://message/… link (share it with the user: clicking it opens the message in the Mail tile, and it survives Mail moving the message) "
                     + "and Mail's own message:// URL.",
-                input: .object(["id": .string(idHelp)])) { args, context in
-                try await run(sessions, context) { session in
-                    let target = try await session.controller.resolve(try args.string("id"))
+                input: .object([
+                    "id": .string(idHelp),
+                    "prefer_mailbox": .integer("A mailbox id from list_mailboxes: when a link's message was moved and has copies in several mailboxes, the copy in this one is chosen (else the newest)").optional,
+                ])) { args, context in
+                let preferred = try integer(args, "prefer_mailbox").map(Int64.init)
+                return try await run(sessions, context) { session in
+                    let target = try await session.controller.resolve(try args.string("id"), preferMailbox: preferred)
                     return try .structured(MailToolLink(
                         id: target.id, link: target.link ?? "mail42://message/\(target.id)",
                         messageURL: target.messageID.flatMap { MailAct.messageURL(messageID: $0) }))
@@ -709,13 +713,34 @@ enum MailTools {
         PluginToolFailure(code: "invalid_arguments", message: message, suggestion: suggestion)
     }
 
+    /// The most an integer argument may be: ids travel as JSON numbers (doubles), and a double holds whole numbers exactly up to 2^53.
+    nonisolated static let maxExactInteger = 9_007_199_254_740_992.0
+
+    /// An optional whole-number argument, checked before the SDK's `optionalInt` reads it: that does `Int(number)`, which traps for
+    /// a number beyond `Int.max` (Int64.max itself reaches it as 2^63). Anything beyond 2^53 is not an id a double could carry.
+    nonisolated static func integer(_ args: PluginToolArguments, _ name: String) throws -> Int? {
+        if case .number(let number)? = args.values[name] {
+            guard number.isFinite, abs(number) <= maxExactInteger else {
+                throw invalid("'\(name)' is too large", "pass '\(name)' as a whole number, as given in an earlier answer")
+            }
+        }
+        return try args.optionalInt(name)
+    }
+
     /// `limit`, between 1 and `maxLimit` (the default when absent).
     nonisolated static func limit(_ args: PluginToolArguments) throws -> Int {
-        guard let value = try args.optionalInt("limit") else { return defaultLimit }
+        guard let value = try integer(args, "limit") else { return defaultLimit }
         guard (1...maxLimit).contains(value) else {
             throw invalid("'limit' must be between 1 and \(maxLimit)", "pass a limit from 1 to \(maxLimit), and page with before_id for more")
         }
         return value
+    }
+
+    /// `before_id`: the id of the last message of the previous page, or nil.
+    nonisolated static func beforeID(_ args: PluginToolArguments) throws -> Int64? {
+        guard let before = try integer(args, "before_id") else { return nil }
+        guard before > 0 else { throw invalid("'before_id' must be a message id", "pass the id of the last message you were given") }
+        return Int64(before)
     }
 
     private static func page(_ found: [MailEnvelope], limit: Int, note: String?) -> MailToolMessages {
@@ -724,11 +749,15 @@ enum MailTools {
             nextBeforeID: found.count >= limit ? found.last?.id : nil, note: note)
     }
 
-    /// `text` cut at `maxBodyCharacters`, and whether it was.
-    nonisolated static func capped(_ text: String?, limit: Int = maxBodyCharacters) -> (text: String?, truncated: Bool) {
+    /// `text` cut at `maxBodyCharacters`, and whether it was. HTML is cut at the last complete tag (`>`) before the limit, so what is
+    /// returned never ends inside a tag (an attribute, a closing tag) or an entity: the text after that tag goes with the cut.
+    nonisolated static func capped(_ text: String?, limit: Int = maxBodyCharacters, html: Bool = false) -> (text: String?, truncated: Bool) {
         guard let text else { return (nil, false) }
         guard let end = text.index(text.startIndex, offsetBy: limit, limitedBy: text.endIndex), end < text.endIndex else { return (text, false) }
-        return (String(text[..<end]), true)
+        let head = text[..<end]
+        guard html else { return (String(head), true) }
+        guard let boundary = head.lastIndex(of: ">") else { return ("", true) }
+        return (String(head[...boundary]), true)
     }
 
     private static func acted(_ action: String, _ id: Int64, _ result: MailActionResult?) throws -> PluginToolResult {

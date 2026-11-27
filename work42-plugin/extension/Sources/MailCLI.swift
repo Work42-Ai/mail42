@@ -22,17 +22,6 @@ nonisolated enum MailAccess: Sendable {
 
 nonisolated enum MailCLI {
 
-    /// One word of the command line Quick Look runs through Work 42's shell (`qlmanage -p <file>`, the one command the plugin still
-    /// starts, hence the `run-commands` permission). Plain words go as they are; anything else is single-quoted, with a quote
-    /// inside it written as `'\''`.
-    static func quoted(_ argument: String) -> String {
-        let plain = argument.unicodeScalars.allSatisfy {
-            $0.value < 128 && (CharacterSet.alphanumerics.contains($0) || "_@%+=:,./-~".unicodeScalars.contains($0))
-        }
-        if plain, !argument.isEmpty { return argument }
-        return "'" + argument.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
     /// A failed answer as the `MailFailure` it describes: its own `{"error":{"code","message"}}` when it printed one, else its
     /// stderr, else its exit status.
     static func failure(from result: MailCLIResult) -> MailFailure {

@@ -254,6 +254,8 @@ nonisolated final class MailCtlDirectTransport: MailTransport, Sendable {
             "html": JSON.orNull(mode == .html ? message.content : nil),
             "attachments": message.attachments.map(JSON.attachment),
             "body_unavailable": message.bodyUnavailable,
+            // Read in this process, whole: nothing here cuts a body (only the tool for an agent does, at `MailTools.maxBodyCharacters`).
+            "truncated": false,
         ] as [String: Any])
     }
 

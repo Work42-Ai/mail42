@@ -59,6 +59,8 @@ private struct ReaderEntry {
     let theme: Int
     /// The themed page itself (the iPad shows it from memory).
     var html: String? = nil
+    /// The paired Mac cut a very long body: the page is its first part only.
+    var truncated = false
     var unavailable: Bool { file == nil && html == nil }
 }
 
@@ -607,7 +609,8 @@ final class MailModel {
             _ = try await mailStore.json(
                 MailActionResult.self, ["mark", envelope.reference, read ? "read" : "unread"], priority: .opened, timeout: .seconds(40))
         } catch {
-            applyRead(envelope.id, !read, mailboxID: envelope.mailbox.id)
+            // The Mac may have done it: only an answer that says it did not is taken back.
+            if !Self.isOutcomeUnknown(error) { applyRead(envelope.id, !read, mailboxID: envelope.mailbox.id) }
             report(error, fallback: "Couldn't change the message in Mail")
         }
     }
@@ -640,7 +643,9 @@ final class MailModel {
             if let color { arguments += ["--color", color] }
             _ = try await mailStore.json(MailActionResult.self, arguments, priority: .opened, timeout: .seconds(40))
         } catch {
-            if let index = envelopes.firstIndex(where: { $0.id == envelope.id }) { envelopes[index].isFlagged = before }
+            if !Self.isOutcomeUnknown(error), let index = envelopes.firstIndex(where: { $0.id == envelope.id }) {
+                envelopes[index].isFlagged = before
+            }
             report(error, fallback: "Couldn't change the flag in Mail")
         }
     }
@@ -664,8 +669,15 @@ final class MailModel {
             }
         } catch {
             report(error, fallback: "Mail couldn't do that")
-            await refreshQuietly()
+            // Reloading now would put the conversation back as if nothing had happened, while the Mac may have done it: the list
+            // stays as the user left it, with the warning, and catches up when Mail next reports a change.
+            if !Self.isOutcomeUnknown(error) { await refreshQuietly() }
         }
+    }
+
+    /// The action was sent and whether it ran is not known (it timed out, or the link dropped): nothing is taken back.
+    private static func isOutcomeUnknown(_ error: any Error) -> Bool {
+        (error as? MailFailure)?.code == "outcome_unknown"
     }
 
     private func clearSelection() {
@@ -685,7 +697,7 @@ final class MailModel {
     private func report(_ error: any Error, fallback: String) {
         if let failure = error as? MailFailure {
             switch failure.code {
-            case "automation_denied", "mail_timeout", "no_archive_mailbox": show(failure.message)
+            case "automation_denied", "mail_timeout", "no_archive_mailbox", "outcome_unknown": show(failure.message)
             default: show(fallback + ": " + failure.message)
             }
         } else {
@@ -694,6 +706,12 @@ final class MailModel {
     }
 
     func openSelectedInMail() async { await perform(.openInMail) }
+
+    /// Opens the message whose body is shown (it may be an earlier one of the conversation) in Mail.
+    func openExpandedInMail() async {
+        guard let id = expandedID ?? selectedID else { return }
+        await run(["open", String(id)], failure: "Couldn't open the message in Mail")
+    }
 
     func openFullDiskAccessSettings() async {
         #if os(macOS)
@@ -731,7 +749,8 @@ final class MailModel {
         }
     }
     #else
-    /// Previews an attachment with macOS Quick Look: it is copied to a temporary folder and `qlmanage` shows it.
+    /// Previews an attachment: it is copied to a temporary folder and opened in its default app (Preview, Quick Look's own viewer for
+    /// most types) through the platform service, so the extension starts no command.
     func quickLook(_ attachment: MailAttachment) async {
         guard let id = expandedID ?? selectedID else { return }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("\(Self.quickLookFolderPrefix)\(id)", isDirectory: true)
@@ -739,9 +758,8 @@ final class MailModel {
             nonisolated struct Saved: Decodable, Sendable { let path: String }
             let saved = try await mailStore.json(
                 Saved.self, ["attachment", "save", String(id), attachment.part, "--to", folder.path], priority: .opened)
-            // `qlmanage -p` stays up until its window is closed, so it is a started command (Work42 stops it with the widget).
-            guard let shell = services?.shell else { throw MailFailure(code: "no_shell", message: "Quick Look needs Work42.") }
-            _ = try await shell.start(command: "qlmanage -p \(MailCLI.quoted(saved.path)) >/dev/null 2>&1")
+            guard let platform = services?.platform else { throw MailFailure(code: "no_platform", message: "Preview needs Work 42.") }
+            platform.open(URL(fileURLWithPath: saved.path))
         } catch {
             report(error, fallback: "Couldn't preview the attachment")
         }
@@ -994,7 +1012,8 @@ final class MailModel {
         }
         let themed = await Task.detached(priority: .userInitiated) { MailBodyTheme.wrap(html, tokens: tokens) }.value
         return ReaderEntry(
-            file: nil, url: nil, key: "mail42:\(key)", attachments: listed, theme: tokens.hashValue, html: themed)
+            file: nil, url: nil, key: "mail42:\(key)", attachments: listed, theme: tokens.hashValue, html: themed,
+            truncated: result.isTruncated)
     }
     #else
     /// Reads the message (HTML to a file, attachments alongside) off the main thread.
@@ -1022,9 +1041,18 @@ final class MailModel {
         guard let url = readerURL(fileName: file.lastPathComponent) else {
             throw MailFailure(code: "no_server", message: "Work42's local artifact server isn't answering yet.")
         }
-        return ReaderEntry(file: file, url: url, key: "mail42:\(key)", attachments: listed, theme: stamp)
+        return ReaderEntry(file: file, url: url, key: "mail42:\(key)", attachments: listed, theme: stamp, truncated: result.isTruncated)
     }
     #endif
+
+    /// What the reader says above a message the Mac cut (read through the paired Mac's tool, which stops at `MailTools.maxBodyCharacters`).
+    static let truncatedNotice = "This message is long; showing the first part. Open in Mail for the rest."
+
+    /// Whether the open message is shown cut: the reader then says so, with an Open in Mail button.
+    var readerTruncated: Bool {
+        guard let id = expandedID, let entry = readerCache[id] else { return false }
+        return entry.truncated
+    }
 
     /// Warms the next message in the list, so stepping down the list is instant. Only that one, and last in line: a guess
     /// never delays what the user asked for, and opening another message cancels it.

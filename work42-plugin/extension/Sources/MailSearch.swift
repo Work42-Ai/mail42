@@ -86,27 +86,38 @@ nonisolated extension MailIndex {
     ///   replaces it with the full answer). Empty for a query that can't be settled by headers (a word under `not`).
     /// - Throws: `MailFailure` with code `bad_query` when the query is not valid.
     func search(
-        _ query: String, limit: Int, scan: MailSearchLimits = .standard, headersOnly: Bool = false,
+        _ query: String, limit: Int, scan: MailSearchLimits = .standard, headersOnly: Bool = false, before: Int64? = nil,
         textScanner: any MailBodyTextSource
     ) async throws -> MailSearchOutcome {
         do {
-            return try await runSearch(query, limit: limit, scan: scan, headersOnly: headersOnly, textScanner: textScanner)
+            return try await runSearch(query, limit: limit, scan: scan, headersOnly: headersOnly, before: before, textScanner: textScanner)
         } catch let error as MailQueryError {
             throw error.failure
         }
     }
 
     private func runSearch(
-        _ query: String, limit: Int, scan: MailSearchLimits, headersOnly: Bool, textScanner: any MailBodyTextSource
+        _ query: String, limit: Int, scan: MailSearchLimits, headersOnly: Bool, before: Int64?, textScanner: any MailBodyTextSource
     ) async throws -> MailSearchOutcome {
         let order = "ORDER BY m.date_received DESC, m.ROWID DESC LIMIT \(max(limit, 0))"
         func outcome(_ records: [Record], note: String? = nil) -> MailSearchOutcome {
             MailSearchOutcome(records: records.map { Self.envelope($0, conversationCount: nil, participants: nil) }, note: note)
         }
 
+        // Keyset paging, as `listEnvelopes`: only messages after `before` in the newest-first order (date, then id), ties included.
+        // It is in every query below that picks messages, so a page never repeats or skips one across the seam.
+        var cursorClauses: [String] = []
+        var cursorParams: [MailSQLValue] = []
+        if let before {
+            guard let date = try dateReceived(of: before) else { throw MailIndexError.notFound("message \(before) (the paging cursor)") }
+            cursorClauses = ["(m.date_received < ? OR (m.date_received = ? AND m.ROWID < ?))"]
+            cursorParams = [.int(date), .int(date), .int(before)]
+        }
+
         let relaxed = try compiler(nil).compile(query)
         guard !relaxed.textTerms.isEmpty else {
-            return outcome(try searchRecords(clauses: ["m.deleted = 0", relaxed.whereSQL], params: relaxed.params, order: order))
+            return outcome(try searchRecords(
+                clauses: ["m.deleted = 0", relaxed.whereSQL] + cursorClauses, params: relaxed.params + cursorParams, order: order))
         }
 
         // 1. What the headers alone settle: exact (for a query with no word under `not`) and instant.
@@ -114,7 +125,8 @@ nonisolated extension MailIndex {
         var cutoff: (date: Int64, id: Int64)?
         if !relaxed.hasNegatedText {
             let headers = try compiler([:]).compile(query)            // every text test false: a subset of the answer
-            headerRecords = try searchRecords(clauses: ["m.deleted = 0", headers.whereSQL], params: headers.params, order: order)
+            headerRecords = try searchRecords(
+                clauses: ["m.deleted = 0", headers.whereSQL] + cursorClauses, params: headers.params + cursorParams, order: order)
             if headersOnly || limit <= 0 { return outcome(headerRecords) }
             if headerRecords.count >= limit, let last = headerRecords.last {
                 cutoff = (last.dateReceived, last.id)                 // an older text match can't displace these
@@ -125,8 +137,8 @@ nonisolated extension MailIndex {
         let known = Set(headerRecords.map(\.id))
 
         // 2. The newest other messages that pass everything that doesn't need their text, to read.
-        var candidateClauses = ["m.deleted = 0", relaxed.whereSQL]
-        var candidateParams = relaxed.params
+        var candidateClauses = ["m.deleted = 0", relaxed.whereSQL] + cursorClauses
+        var candidateParams = relaxed.params + cursorParams
         if let cutoff {
             candidateClauses.append("(m.date_received > ? OR (m.date_received = ? AND m.ROWID > ?))")
             candidateParams += [.int(cutoff.date), .int(cutoff.date), .int(cutoff.id)]

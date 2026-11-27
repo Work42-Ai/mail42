@@ -687,12 +687,13 @@ nonisolated extension MailCtl {
             }
         }
 
-        /// - Throws: `bad_query` (with the position) for a query that is not valid.
+        /// - Parameter before: only messages older than this one (the last id of the previous page), as `list`'s `beforeID`.
+        /// - Throws: `bad_query` (with the position) for a query that is not valid; `not_found` for a `before` that is no message.
         func search(
-            _ query: String, limit: Int = 50, headersOnly: Bool = false, scan: MailSearchLimits = .standard
+            _ query: String, limit: Int = 50, headersOnly: Bool = false, scan: MailSearchLimits = .standard, before: Int64? = nil
         ) async throws -> MailSearchOutcome {
             try await withIndex { index, reader in
-                try await index.search(query, limit: limit, scan: scan, headersOnly: headersOnly, textScanner: reader)
+                try await index.search(query, limit: limit, scan: scan, headersOnly: headersOnly, before: before, textScanner: reader)
             }
         }
 

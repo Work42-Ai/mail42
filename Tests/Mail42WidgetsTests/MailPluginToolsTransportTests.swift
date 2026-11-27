@@ -174,6 +174,10 @@ private nonisolated struct Acted: Decodable, Sendable {
     let link: String?
 }
 
+private nonisolated struct Probe: Decodable, Sendable {
+    let id: Int
+}
+
 private nonisolated struct Saved: Decodable, Sendable {
     let path: String
     let bytes: Int
@@ -318,7 +322,8 @@ struct MailPluginToolsTransportTests {
 
         // The CLI's own object: an envelope, headers, text and html (one null), attachments and body_unavailable.
         let raw = try JSONSerialization.jsonObject(with: try await mac.ok(["message", "read", link101, "--json"]).stdout) as? [String: Any]
-        #expect(Set(try #require(raw).keys) == ["envelope", "headers", "text", "html", "attachments", "body_unavailable"])
+        #expect(Set(try #require(raw).keys) == ["envelope", "headers", "text", "html", "attachments", "body_unavailable", "truncated"])
+        #expect(raw?["truncated"] as? Bool == false)
         #expect((raw?["text"] as? String)?.contains("quokkabody") == true && raw?["html"] is NSNull)
         #expect(mac.fake.calls.last?.arguments == ["id": .string(link101), "format": .string("text")])
     }
@@ -339,10 +344,11 @@ struct MailPluginToolsTransportTests {
         for id in [101, 104, 105] {
             #expect(try await mac.store.json(MailEnvelope.self, ["message", "resolve", String(id)]).id == Int64(id))
         }
-        // `--prefer-mailbox` is the CLI's; the tools have no such argument, so it is not sent and the answer is still the message.
+        // `--prefer-mailbox` is sent to the link tool as `prefer_mailbox` (a mailbox id), and only when it was given.
+        #expect(mac.fake.calls(of: "get_message_link").last?.arguments.keys.contains("prefer_mailbox") == false)
         let preferred = try await mac.store.json(MailEnvelope.self, ["message", "resolve", link101, "--prefer-mailbox", "1"])
         #expect(preferred.id == 101)
-        #expect(mac.fake.calls.last?.arguments.keys.contains("prefer_mailbox") == false)
+        #expect(mac.fake.calls(of: "get_message_link").last?.arguments == ["id": .string(link101), "prefer_mailbox": .number(1)])
         let missing = await ctlFailure { try await mac.store.json(MailEnvelope.self, ["message", "resolve", "999"]) }
         #expect(missing?.code == "not_found")
     }
@@ -585,6 +591,192 @@ struct MailPluginToolsTransportTests {
             Issue.record("a cancelled task still ran a call")
         } catch is CancellationError {
         }
+    }
+
+    // MARK: Uncertain outcomes (Codex P1)
+
+    private static let changingCommands: [[String]] = [
+        ["mark", "101", "read"], ["move", "103", "Archive"], ["archive", "103"], ["delete", "103"], ["junk", "103"],
+        ["draft", "reply", "101"], ["attachment", "save", "103", "2", "--to", "~/Downloads"], ["open", "101"],
+    ]
+
+    @Test("a changing call cancelled after it was sent is outcome_unknown (check on your Mac); one cancelled before it was sent is a plain cancellation; a read is a plain cancellation")
+    func cancelledChangingCall() async throws {
+        let mac = try Mac()
+        defer { mac.cleanUp() }
+        for command in Self.changingCommands {
+            for error in [PluginToolFailure.cancelled as any Error, CancellationError()] {
+                mac.fake.fail { _, _ in error }
+                let before = mac.fake.calls.count
+                let failure = await ctlFailure { try await mac.transport.run(command + ["--json"]) }
+                #expect(failure?.code == "outcome_unknown", "\(command) \(error)")
+                #expect(failure?.message.contains("Check on your Mac before doing it again") == true)
+                #expect(mac.fake.calls.count == before + 1)
+            }
+        }
+        mac.fake.fail { _, _ in PluginToolFailure.cancelled }
+        do {
+            _ = try await mac.transport.run(["mailbox", "list"])
+            Issue.record("a cancelled read is a cancellation")
+        } catch is CancellationError {
+        }
+
+        // Cancelled before anything was sent: it certainly did not run.
+        mac.fake.fail(nil)
+        let before = mac.fake.calls.count
+        let task = Task {
+            while !Task.isCancelled { await Task.yield() }
+            return try await mac.transport.run(["archive", "103"])
+        }
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("a task cancelled before the send still ran")
+        } catch is CancellationError {
+        }
+        #expect(mac.fake.calls.count == before, "nothing was sent")
+    }
+
+    @Test("the remote service's timeout of a changing call is outcome_unknown; the same words on a read are mac_unreachable")
+    func remoteTimeoutOfChangingCall() async throws {
+        let mac = try Mac()
+        defer { mac.cleanUp() }
+        let timedOut = PluginToolFailure(code: PluginRemoteFailure.macUnreachable, message: "Your Mac didn\u{2019}t answer in time (75 s).")
+        mac.fake.fail { _, _ in timedOut }
+        for command in Self.changingCommands {
+            let failure = await ctlFailure { try await mac.transport.run(command + ["--json"]) }
+            #expect(failure?.code == "outcome_unknown", "\(command) → \(String(describing: failure))")
+        }
+        #expect(await ctlFailure { try await mac.transport.run(["mailbox", "list"]) }?.code == "mac_unreachable")
+        // No Mac to reach at all (nothing was sent) is still plainly unreachable.
+        mac.fake.fail { _, _ in unreachable }
+        #expect(await ctlFailure { try await mac.transport.run(["archive", "103", "--json"]) }?.code == "mac_unreachable")
+    }
+
+    // MARK: Integers that do not survive a JSON number (Codex P1)
+
+    @Test("an id or cursor that cannot round-trip through a double (Int64.max, 2^53+1) is refused before the Mac is asked; 2^53 is not")
+    func unsafeIntegersAreRefused() async throws {
+        let mac = try Mac()
+        defer { mac.cleanUp() }
+        for raw in ["9223372036854775807", "9007199254740993", "-9007199254740993", "-9223372036854775808"] {
+            for command in [["envelope", "list", "--before", raw], ["message", "resolve", link101, "--prefer-mailbox", raw]] {
+                let result = try await mac.transport.run(command + ["--json"])
+                #expect(result.status != 0 && MailCLI.failure(from: result).code == "usage", "\(command)")
+            }
+        }
+        #expect(mac.fake.calls.isEmpty, "none of them reached the Mac")
+        let edge = try await mac.transport.run(["envelope", "list", "--before", "9007199254740992", "--json"])
+        #expect(mac.fake.calls.count == 1, "2^53 is exact and is sent")
+        #expect(MailCLI.failure(from: edge).code == "not_found", "the Mac says there is no such message")
+    }
+
+    @Test("an integer in a tool's answer that is not exact (a cursor or id beyond 2^53) is bad_output, never a trap")
+    func unsafeIntegersInResults() async throws {
+        let huge = 9.3e18
+        let fake = ToolFake { tool, _ in
+            switch tool {
+            case "list_messages", "search_messages":
+                return PluginToolResult(content: [], structured: .object([
+                    "messages": .array([.object(["id": .number(5)])]), "count": .number(1), "next_before_id": .number(huge),
+                ]))
+            default:
+                return PluginToolResult(content: [], structured: .object(["id": .number(huge), "link": .string("mail42://message/1")]))
+            }
+        }
+        let transport = MailPluginToolsTransport(tools: fake)
+        for command in [["envelope", "list", "--limit", "150"], ["envelope", "search", "x", "--limit", "150"], ["message", "resolve", "7"]] {
+            let result = try await transport.run(command + ["--json"])
+            #expect(result.status != 0 && MailCLI.failure(from: result).code == "bad_output", "\(command)")
+        }
+    }
+
+    // MARK: A cut message says so (Codex P2)
+
+    @Test("message read carries the tool's `truncated` flag to the widget's decode; an older answer without it decodes as not cut")
+    func truncatedReachesTheWidget() async throws {
+        let fake = ToolFake { _, _ in
+            PluginToolResult(content: [], structured: .object([
+                "envelope": .null, "headers": .object([:]), "text": .null, "html": .string("<p>start"), "attachments": .array([]),
+                "body_unavailable": .bool(false), "truncated": .bool(true),
+            ]))
+        }
+        let store = MailStore(transport: MailPluginToolsTransport(tools: fake))
+        let cut = try await store.json(MailReadResult.self, ["message", "read", "1", "--html"])
+        #expect(cut.truncated == true && cut.isTruncated && cut.html == "<p>start")
+
+        let older = try JSONDecoder().decode(MailReadResult.self, from: Data(#"{"path":null,"body_unavailable":false}"#.utf8))
+        #expect(older.truncated == nil && !older.isTruncated)
+    }
+
+    // MARK: Searches beyond 100 (Codex P2)
+
+    @Test("a search for more than the tool's 100 pages with before_id: every match once, newest first, no gap at the page seam")
+    func searchPaging() async throws {
+        let world = try CtlWorld()
+        for index in 0..<130 {
+            let rowid = Int64(1000 + index)
+            try world.builder.addMessage(.init(
+                rowid: rowid, subject: "Bulk \(index)", senderAddress: "bulk@example.com", senderName: "Bulk", mailboxID: 1,
+                dateReceived: ctlBase + 1000 + Int64(index / 2), read: true, flagged: false, conversationID: 0, summary: nil,
+                messageIDHeader: "<bulk-\(rowid)@example.com>"))      // pairs share a date, so the seam can fall between ties
+        }
+        let mac = try Mac(world)
+        defer { mac.cleanUp() }
+        let all = try await mac.store.json([MailEnvelope].self, ["envelope", "search", "subject:bulk", "--headers", "--limit", "300"])
+        #expect(all.map(\.id) == (1000..<1130).reversed().map(Int64.init), "130 matches, each once, newest first")
+        let sent = mac.fake.calls(of: "search_messages")
+        #expect(sent.count == 2)
+        guard sent.count == 2, all.count > 99 else { return }
+        #expect(sent[0].arguments["limit"] == .number(100) && sent[0].arguments["before_id"] == nil)
+        #expect(sent[1].arguments["before_id"] == .number(Double(all[99].id)) && sent[1].arguments["headers_only"] == .bool(true))
+        #expect(Set(sent.map(\.requestId)).count == 2, "no request id is shared between pages")
+
+        // Exactly the limit is one call; fewer than a page is one call.
+        let before = mac.fake.calls.count
+        #expect(try await mac.store.json([MailEnvelope].self, ["envelope", "search", "subject:bulk", "--headers", "--limit", "100"]).count == 100)
+        #expect(try await mac.store.json([MailEnvelope].self, ["envelope", "search", "subject:bulk", "--headers", "--limit", "7"]).count == 7)
+        #expect(mac.fake.calls.count == before + 2)
+    }
+
+    @Test("a search is paged up to 500 results and no further")
+    func searchPagingCap() async throws {
+        let fake = ToolFake { tool, arguments in
+            var limit = 0
+            if case .number(let n)? = arguments["limit"] { limit = Int(n) }
+            var start = 100_000
+            if case .number(let n)? = arguments["before_id"] { start = Int(n) }
+            let ids = (0..<limit).map { start - 1 - $0 }
+            return PluginToolResult(content: [], structured: .object([
+                "messages": .array(ids.map { .object(["id": .number(Double($0))]) }), "count": .number(Double(limit)),
+                "next_before_id": .number(Double(ids.last ?? 0)),
+            ]))
+        }
+        let transport = MailPluginToolsTransport(tools: fake)
+        let result = try await transport.run(["envelope", "search", "x", "--headers", "--limit", "900", "--json"])
+        let ids = try JSONDecoder().decode([Probe].self, from: result.stdout).map(\.id)
+        #expect(ids.count == 500 && Set(ids).count == 500)
+        #expect(fake.calls(of: "search_messages").count == 5)
+    }
+
+    // MARK: --prefer-mailbox (Codex P2)
+
+    @Test("a stale link whose Message-ID has a copy in two mailboxes resolves to the copy in the preferred mailbox")
+    func preferMailbox() async throws {
+        let world = try CtlWorld()
+        for (rowid, mailbox, offset) in [(Int64(300), Int64(1), Int64(2000)), (301, 2, 2001)] {
+            try world.builder.addMessage(.init(
+                rowid: rowid, subject: "Copy", senderAddress: "copy@example.com", senderName: "Copy", mailboxID: mailbox,
+                dateReceived: ctlBase + offset, read: true, flagged: false, conversationID: 0, summary: nil,
+                messageIDHeader: "<copy@example.com>"))
+        }
+        let mac = try Mac(world)
+        defer { mac.cleanUp() }
+        let stale = "mail42://message/9999?mid=copy%40example.com"
+        #expect(try await mac.store.json(MailEnvelope.self, ["message", "resolve", stale]).id == 301, "the newest copy by default")
+        #expect(try await mac.store.json(MailEnvelope.self, ["message", "resolve", stale, "--prefer-mailbox", "1"]).id == 300)
+        #expect(try await mac.store.json(MailEnvelope.self, ["message", "resolve", stale, "--prefer-mailbox", "2"]).id == 301)
+        #expect(try await mac.store.json(MailEnvelope.self, ["message", "resolve", stale, "--prefer-mailbox", "3"]).id == 301, "none there: the newest")
     }
 
     // MARK: Request ids

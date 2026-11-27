@@ -30,17 +30,4 @@ struct Mail42WidgetsTests {
         #expect(Mail42Widget.makeWidget(id: "calendar") == nil)
         #expect(Mail42Widget.hostedIDs == Mail42Widget.allIDs)
     }
-
-    @Test("a command line word is quoted so the Mac's shell reads it as one argument")
-    func quoting() {
-        #expect(MailCLI.quoted("message") == "message")
-        #expect(MailCLI.quoted("123") == "123")
-        #expect(MailCLI.quoted("mail42://message/42") == "mail42://message/42")
-        #expect(MailCLI.quoted("~/Downloads") == "~/Downloads")
-        #expect(MailCLI.quoted("from:ada@example.com") == "from:ada@example.com")
-        #expect(MailCLI.quoted("quarterly report") == "'quarterly report'")
-        #expect(MailCLI.quoted("") == "''")
-        #expect(MailCLI.quoted("it's") == "'it'\\''s'")
-        #expect(MailCLI.quoted("caf\u{00E9}") == "'caf\u{00E9}'")
-    }
 }

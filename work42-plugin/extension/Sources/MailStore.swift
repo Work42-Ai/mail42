@@ -9,7 +9,8 @@
 //   shared        a question already in flight is not asked twice: the second asker waits for the first's answer
 //   cancellable   a task that stops waiting (you opened another message) really cancels the request; when every asker
 //                 of a question has gone, the question is dropped if it is still queued and cancelled if it is running
-//   bounded       a request that gets no answer within its timeout ends with a `timeout` failure
+//   bounded       a request that gets no answer within its timeout ends with a `timeout` failure; a request that changes mail
+//                 and was already sent ends with `outcome_unknown` instead (it may have run: say so, never "it failed")
 //
 // The model only ever awaits the store and applies the finished, decoded value.
 
@@ -35,12 +36,24 @@ actor MailStore {
         let arguments: [String]
         var priority: Priority
         let sequence: Int
+        /// The request changes something (mail, a saved file, a window in Mail): once sent, it may have run.
+        let changing: Bool
         var waiters: [UUID: CheckedContinuation<MailCLIResult, Error>] = [:]
         var timers: [UUID: Task<Void, Never>] = [:]
         var task: Task<Void, Never>?
 
         init(key: String, arguments: [String], priority: Priority, sequence: Int) {
             self.key = key; self.arguments = arguments; self.priority = priority; self.sequence = sequence
+            changing = MailStore.changes(arguments)
+        }
+    }
+
+    /// Whether a request changes something, by its verb (the transports' own list of changing tools is the same set).
+    nonisolated static func changes(_ arguments: [String]) -> Bool {
+        switch arguments.first {
+        case "mark", "move", "archive", "delete", "junk", "draft", "open": return true
+        case "attachment": return arguments.dropFirst().first == "save"
+        default: return false
         }
     }
 
@@ -184,6 +197,13 @@ actor MailStore {
             ?? queued.first { $0.key == key && $0.waiters[waiter] != nil }
         guard let entry, let continuation = entry.waiters.removeValue(forKey: waiter) else { return }
         entry.timers.removeValue(forKey: waiter)?.cancel()
+        // A changing request that was already sent (it is running, not queued) may have been done by the Mac: giving up on the
+        // answer is not "it failed" and not "nothing happened". One still queued certainly did not run, and says what it was.
+        var error = error
+        if entry.changing, running[entry.key] === entry,
+           error is CancellationError || (error as? MailFailure)?.code == "timeout" {
+            error = MailFailure.outcomeUnknown
+        }
         continuation.resume(throwing: error)
         guard entry.waiters.isEmpty else { return }
 

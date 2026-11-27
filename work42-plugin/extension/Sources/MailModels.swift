@@ -133,9 +133,13 @@ nonisolated struct MailReadResult: Codable, Equatable, Sendable {
     /// folder the Mac could write into).
     var html: String? = nil
     let bodyUnavailable: Bool
+    /// The body was cut at `MailTools.maxBodyCharacters` (the paired Mac's tool says so). Absent in older output: not cut.
+    var truncated: Bool? = nil
+
+    var isTruncated: Bool { truncated == true }
 
     enum CodingKeys: String, CodingKey {
-        case path, html
+        case path, html, truncated
         case bodyUnavailable = "body_unavailable"
     }
 }
@@ -158,4 +162,10 @@ nonisolated struct MailErrorEnvelope: Codable {
 nonisolated struct MailFailure: Error, Equatable {
     let code: String
     let message: String
+
+    /// What a changing action says when it may or may not have run (it timed out or was cancelled after it was sent).
+    static let checkOnMac = "Your Mac didn\u{2019}t confirm whether Mail did it. Check on your Mac before doing it again."
+
+    /// The action was sent and its outcome is not known: it is never repeated blindly, and the widget keeps what it showed.
+    static var outcomeUnknown: MailFailure { MailFailure(code: "outcome_unknown", message: checkOnMac) }
 }

@@ -142,7 +142,8 @@ struct MailDirectTransportTests {
         let read = try decode(MailReadResult.self, inline)
         #expect(read.path == nil && read.html?.contains("Roadmap headline") == true && !read.bodyUnavailable)
         let whole = try object(inline)
-        #expect(Set(whole.keys) == ["envelope", "headers", "text", "html", "attachments", "body_unavailable"])
+        #expect(Set(whole.keys) == ["envelope", "headers", "text", "html", "attachments", "body_unavailable", "truncated"])
+        #expect(whole["truncated"] as? Bool == false, "read in this process, whole")
         #expect(whole["text"] is NSNull)
         #expect((whole["envelope"] as? [String: Any])?["id"] as? Int == 102)
 

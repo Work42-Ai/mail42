@@ -22,6 +22,4 @@ permissions:
   - name: automation
     target: com.apple.mail
     reason: Marks, flags, moves, archives and drafts messages in Apple Mail.
-  - name: run-commands
-    reason: Opens an attachment with macOS Quick Look (qlmanage) when you preview it in the Mail widget.
 requires: []

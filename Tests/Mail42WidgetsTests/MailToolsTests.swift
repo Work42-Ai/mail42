@@ -250,6 +250,91 @@ struct MailToolsTests {
         #expect(try await rig.call("search_messages", ["query": .string("is:unread"), "limit": .number(1)]).messageIDs == [102])
     }
 
+    @Test("search_messages pages like list_messages: next_before_id when the page is full, before_id starts after that message")
+    func searchPaging() async throws {
+        let rig = try Rig(try CtlWorld())
+        defer { rig.cleanUp() }
+        let query: WidgetJSONValue = .string("in:inbox")
+        let first = try await rig.call("search_messages", ["query": query, "limit": .number(2)])
+        #expect(first.messageIDs == [103, 102] && first.field("next_before_id")?.integer == 102)
+        let second = try await rig.call("search_messages", ["query": query, "limit": .number(2), "before_id": .number(102)])
+        #expect(second.messageIDs == [101, 104] && second.field("next_before_id")?.integer == 104)
+        let third = try await rig.call("search_messages", ["query": query, "limit": .number(2), "before_id": .number(104)])
+        #expect(third.messageIDs == [] && third.field("next_before_id") == nil)
+        let last = try await rig.call("search_messages", ["query": query, "before_id": .number(102)])
+        #expect(last.messageIDs == [101, 104] && last.field("next_before_id") == nil, "a page that is not full has no next")
+
+        // A text term pages too (its candidates are cut at the cursor as well).
+        let text = try await rig.call("search_messages", ["query": .string("quokkabody"), "before_id": .number(102)])
+        #expect(text.messageIDs == [101])
+        #expect(try await rig.call("search_messages", ["query": .string("quokkabody"), "before_id": .number(101)]).messageIDs == [])
+
+        let failure = await rig.failure("search_messages", ["query": query, "before_id": .number(0)])
+        #expect(failure?.code == "invalid_arguments")
+        let missing = await rig.failure("search_messages", ["query": query, "before_id": .number(999)])
+        #expect(missing?.code == "not_found", "a cursor that is no message is not_found, as for list_messages")
+    }
+
+    @Test("an integer argument beyond 2^53 (Int64.max rounds to 2^63) is invalid_arguments, not a trap")
+    func unsafeIntegerArguments() async throws {
+        let rig = try Rig(try CtlWorld())
+        defer { rig.cleanUp() }
+        for huge in [9_223_372_036_854_775_807.0, 9_007_199_254_740_993.0 * 2, -9_007_199_254_740_994.0, 1e300] {
+            for (tool, name, base) in [
+                ("list_messages", "before_id", [:]), ("list_messages", "limit", [:]),
+                ("search_messages", "before_id", ["query": WidgetJSONValue.string("in:inbox")]),
+                ("search_messages", "limit", ["query": WidgetJSONValue.string("in:inbox")]),
+                ("get_message_link", "prefer_mailbox", ["id": WidgetJSONValue.string("101")]),
+            ] as [(String, String, [String: WidgetJSONValue])] {
+                var arguments = base
+                arguments[name] = .number(huge)
+                #expect(await rig.failure(tool, arguments)?.code == "invalid_arguments", "\(tool) \(name) \(huge)")
+            }
+        }
+        // 2^53 itself is exact, so it is a number like any other (here: no such message).
+        #expect(await rig.failure("list_messages", ["before_id": .number(9_007_199_254_740_992)])?.code == "not_found")
+    }
+
+    @Test("get_message_link prefers the copy in prefer_mailbox when a stale link's Message-ID is in several mailboxes")
+    func linkPrefersMailbox() async throws {
+        let world = try CtlWorld()
+        for (rowid, mailbox, offset) in [(Int64(300), Int64(1), Int64(2000)), (301, 2, 2001)] {
+            try world.builder.addMessage(.init(
+                rowid: rowid, subject: "Copy", senderAddress: "copy@example.com", senderName: "Copy", mailboxID: mailbox,
+                dateReceived: ctlBase + offset, read: true, flagged: false, conversationID: 0, summary: nil,
+                messageIDHeader: "<copy@example.com>"))
+        }
+        let rig = try Rig(world)
+        defer { rig.cleanUp() }
+        let stale = WidgetJSONValue.string("mail42://message/9999?mid=copy%40example.com")
+        #expect(try await rig.call("get_message_link", ["id": stale]).field("id")?.integer == 301)
+        #expect(try await rig.call("get_message_link", ["id": stale, "prefer_mailbox": .number(1)]).field("id")?.integer == 300)
+        #expect(try await rig.call("get_message_link", ["id": stale, "prefer_mailbox": .number(2)]).field("id")?.integer == 301)
+    }
+
+    @Test("a cut body is cut at a tag boundary for HTML, anywhere for text, and says it was cut")
+    func cappedBodies() {
+        let html = "<p>Hello <a href=\"https://example.com/a?b=c\">world</a></p><p>second</p>"
+        // Inside the anchor's opening tag: cut at the last complete tag (`>`), so no half tag is left.
+        let inTag = MailTools.capped(html, limit: 20, html: true)
+        #expect(inTag.truncated && inTag.text == "<p>")
+        // Inside a closing tag, and inside text after a complete tag: the same.
+        #expect(MailTools.capped(html, limit: 56, html: true).text == "<p>Hello <a href=\"https://example.com/a?b=c\">world</a>")
+        let inText = MailTools.capped(html, limit: 62, html: true)
+        #expect(inText.truncated && inText.text == "<p>Hello <a href=\"https://example.com/a?b=c\">world</a></p><p>")
+        for text in [inTag.text, inText.text].compactMap({ $0 }) {
+            #expect(text.filter { $0 == "<" }.count == text.filter { $0 == ">" }.count, "\(text) has a half tag")
+        }
+        // Not cut: returned as it is.
+        #expect(MailTools.capped(html, limit: 1000, html: true) == (html, false))
+        // No tag boundary at all: nothing malformed is returned.
+        #expect(MailTools.capped("<p class=\"long", limit: 5, html: true).text == "")
+        // Text is cut at the limit, as before.
+        let plain = MailTools.capped("abcdefghij", limit: 4)
+        #expect(plain.truncated && plain.text == "abcd")
+        #expect(MailTools.capped(nil, limit: 4) == (nil, false))
+    }
+
     @Test("read_message: text by default, by id or by link, with the envelope, headers and attachments; html is sanitised; a partial download is body_unavailable")
     func readMessage() async throws {
         let rig = try Rig(try CtlWorld())

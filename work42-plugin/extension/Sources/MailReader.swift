@@ -204,6 +204,17 @@ private struct MailOpenMessage: View {
             if !model.attachments.isEmpty {
                 MailAttachmentCards(model: model, attachments: model.attachments)
             }
+            if model.readerTruncated {
+                // The paired Mac cut a very long body: never show it as the whole message.
+                HStack(spacing: DT.s8) {
+                    Image(systemName: "text.append").foregroundStyle(.secondary)
+                    Text(MailModel.truncatedNotice).font(.callout).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Button("Open in Mail") { Task { await model.openExpandedInMail() } }.glassPlainCapsule()
+                }
+                .padding(.horizontal, DT.s12)
+                .padding(.vertical, DT.s8)
+            }
             Divider().opacity(0.4)
             MailBodyView(model: model, services: services)
         }

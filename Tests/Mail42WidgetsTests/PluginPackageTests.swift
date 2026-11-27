@@ -101,16 +101,21 @@ struct PluginPackageTests {
         #expect(!manifest.contains("github.com/Work42-Ai/mail42"), "the description must not send people to the CLI")
     }
 
-    @Test("`run-commands` is declared exactly when the extension still starts a command (Quick Look's qlmanage), and for nothing else")
-    func runCommandsMatchesShellUse() throws {
-        let declared = permissions(try text("plugin.yaml")).map(\.name).contains("run-commands")
-        let shellCalls = ["shell.start(", "shell.run(", "services?.shell", "services.shell"]
+    @Test("the extension starts no command anywhere (no shell, no qlmanage) and plugin.yaml does not declare `run-commands`")
+    func noShellAndNoRunCommands() throws {
+        let manifest = try text("plugin.yaml")
+        #expect(!permissions(manifest).map(\.name).contains("run-commands"), "run-commands is declared")
+        #expect(!manifest.contains("run-commands"))
+        let shellCalls = ["shell.start(", "shell.run(", "services?.shell", "services.shell", "qlmanage", "Process(", "NSTask", "/bin/sh"]
         var users: [String] = []
-        for source in try extensionSources() where shellCalls.contains(where: source.text.contains) { users.append(source.name) }
-        #expect(declared == !users.isEmpty, "run-commands declared: \(declared); files that run a command: \(users)")
-        #expect(users.allSatisfy { $0 == "MailModel.swift" }, "only the Quick Look preview runs a command: \(users)")
-        let model = try #require(try extensionSources().first { $0.name == "MailModel.swift" }?.text)
-        #expect(!users.isEmpty ? model.contains("qlmanage -p") : true)
+        for source in try extensionSources() {
+            for call in shellCalls where source.text.contains(call) { users.append("\(source.name): \(call)") }
+        }
+        #expect(users.isEmpty, "the extension still runs a command: \(users)")
+        for file in ["plugin.yaml", "widgets/mail/widget.yaml", "widgets/mail/SKILL.md", "skills/mail/SKILL.md"] {
+            let body = try text(file).lowercased()
+            #expect(!body.contains("qlmanage") && !body.contains("run commands") && !body.contains("shell"), "\(file) still mentions the shell")
+        }
     }
 
     // MARK: The widget, its MCP and its skill
